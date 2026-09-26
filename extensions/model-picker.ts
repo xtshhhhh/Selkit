@@ -5,9 +5,9 @@
  * 内置 /model 是一个扁平长列表，几十条挤在一起。
  *
  * 提供的入口：
- *   /model         → 覆盖内置（拦编辑器提交）
- *   /mp  /models   → 同一窗口（保底别名）
- *   Ctrl+L         → 同一窗口（覆盖内置键位）
+ *   /model    → 分组窗口（覆盖内置，靠换编辑器拦 Enter）
+ *   Ctrl+L    → 同上（同样靠换编辑器拦字节 0x0C）
+ *   /models   → 同上（保底别名，万一编辑器替换失效）
  *
  * 窗口特性：
  *   - 左右分栏：左侧模型列表，右侧 COMMAND DECK 指令面板
@@ -52,7 +52,7 @@ const ENABLED_PATTERNS: string[] | undefined = ["cc-switch/*", "ccs-codex/*"];
 /**
  * 是否覆盖内置 /model。
  * true  → /model 打开本窗口
- * false → /model 保持 pi 原生；用 /mp 或 Ctrl+L
+ * false → /model 和 Ctrl+L 都保持 pi 原生行为；用 /models
  * 升级 pi 后若输入框异常，改成 false 即可恢复。
  */
 const OVERRIDE_MODEL_COMMAND = true;
@@ -646,22 +646,26 @@ export default function (pi: ExtensionAPI) {
     await open(ctx, (args ?? "").trim().toLowerCase() === "default");
   };
 
-  pi.registerCommand("mp", { description: "赛博朋克风分组模型选择窗口", handler });
-  pi.registerCommand("models", { description: "同 /mp（保底别名）", handler });
+  // 只留 /model 一个入口（/mp 已按要求删除）
+  pi.registerCommand("models", { description: "分组模型选择窗口（/model 出不来时的保底）", handler });
 
-  // 覆盖内置 Ctrl+L（内置无 restrictOverride，扩展优先）
-  pi.registerShortcut("ctrl+l", {
-    description: "Model Picker（覆盖内置选择器）",
-    handler: async (ctx) => open(ctx, false),
-  });
-  pi.registerShortcut("ctrl+shift+m", {
-    description: "Model Picker（分组模型选择窗口）",
-    handler: async (ctx) => open(ctx, false),
-  });
-
-  // ── 覆盖 /model：拦编辑器提交 ──
-  // 注意：pi 的 setCustomEditorComponent 会在工厂返回后覆盖 onSubmit，
-  // 所以必须在 handleInput 里拦 Enter，不能改 onSubmit。
+  // ── 覆盖 /model 与 Ctrl+L ──
+  //
+  // 为什么必须换编辑器（三条路都被 pi 堵死了）：
+  //   1. registerCommand("model")  —— 无效。内置 /model 分支在
+  //      interactive-mode.js 的 setupEditorSubmitHandler 里，早于扩展命令。
+  //   2. registerShortcut("ctrl+l") —— 无效。app.model.select 默认键就是
+  //      ctrl+l，且它在 RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS 清单里，
+  //      runner.getShortcuts() 会直接 continue 跳过扩展注册。
+  //   3. input 事件  —— 无效。内置命令在 TUI 层就 return 了，根本到不了
+  //      emitInput。
+  //
+  // 唯一可行：用 setEditorComponent 换掉输入框，在 handleInput 里
+  //   - 拦 Ctrl+L（原始字节 0x0C）
+  //   - 拦 Enter 提交的 /model
+  //
+  // 坑：pi 在工厂返回后会执行 newEditor.onSubmit = defaultEditor.onSubmit，
+  // 覆盖我们设的 onSubmit，所以只能拦 handleInput。
   if (OVERRIDE_MODEL_COMMAND) {
     pi.on("session_start", async (_e, ctx) => {
       if (ctx.mode !== "tui") return;
@@ -669,8 +673,15 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setEditorComponent((tui, theme, keybindings) => {
           const ed = new CustomEditor(tui, theme, keybindings);
           const superHandle = ed.handleInput.bind(ed);
+
           ed.handleInput = (data: string) => {
-            // 只在「按 Enter」且「文本正好是 /model」时截胡
+            // ① Ctrl+L：内置键位被保留，只能在这里截
+            if (matchesKey(data, "ctrl+l")) {
+              ed.setText("");
+              void open(ctx, false);
+              return;
+            }
+            // ② Enter 提交 /model
             if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
               const t = ed.getText().trim();
               if (t === "/model" || t.startsWith("/model ")) {
@@ -681,10 +692,11 @@ export default function (pi: ExtensionAPI) {
             }
             superHandle(data);
           };
+
           return ed;
         });
       } catch {
-        /* 换编辑器失败 → 退回 /mp */
+        /* 换编辑器失败 → 退回 /models */
       }
     });
   }

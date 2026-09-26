@@ -8,14 +8,16 @@
 
 | 命令 | 作用 |
 |---|---|
-| `/model` | **打开分组模型选择窗口**（覆盖内置）|
-| `/mp` `/models` | 同上（别名）|
-| `Ctrl+L` | 同上（覆盖内置键位）|
-| `/ccsync` | 重新读取 CC Switch 的卡 |
+| `/model` | **打开分组模型选择窗口**（覆盖内置） |
+| `Ctrl+L` | 同上（覆盖内置键位） |
+| `/models` | 同上（保底别名，万一上面的失效） |
 
-> **关于覆盖 `/model`**：pi 的内置 `/model` 分支在扩展命令之前处理，抢不走。
-> 这里用 `setEditorComponent` 换掉输入框，在 `handleInput` 里拦下 Enter 提交的 `/model`。
-> 若升级 pi 后输入框异常，把扩展顶部的 `OVERRIDE_MODEL_COMMAND` 改成 `false` 即可恢复。
+> **为什么需要覆盖**：`/model` 的内置分支在 TUI 层 `setupEditorSubmitHandler()`，
+> 早于扩展命令；而 `Ctrl+L` 对应的 `app.model.select` 在 pi 的
+> `RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS` 清单里，扩展快捷键会被跳过。
+>
+> 本扩展用 `setEditorComponent` 换掉输入框，在 `handleInput` 里直接拦 `Ctrl+L` 字节和 `/model` 提交。
+> 若升级 pi 后输入框异常，把顶部的 `OVERRIDE_MODEL_COMMAND` 改成 `false` 即可恢复原生行为（此时用 `/models`）。
 
 ### 窗口长什么样
 

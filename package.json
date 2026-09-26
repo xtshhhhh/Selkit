@@ -1,6 +1,6 @@
 {
   "name": "pi-ccswitch-sync",
-  "version": "1.2.0",
+  "version": "1.2.2",
   "description": "Sync CC Switch relays into pi as model providers, with a cyberpunk grouped model picker that overrides /model.",
   "keywords": [
     "pi-package",
