@@ -1,5 +1,64 @@
 # Changelog
 
+## 1.3.0
+
+### 回退：不再覆盖 `/model` 和 `Ctrl+L`
+
+试了 5 个版本都没能让 `/model` 在所有环境稳定生效。原因太多且互相叠加：
+
+- pi 在 TUI 层就吃掉 `/model`（`setupEditorSubmitHandler` 早于扩展命令）
+- `ctrl+l` 在 `RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS` 里，扩展注册被跳过
+- 换编辑器后 `onSubmit` 被 pi 覆盖、差分渲染少 1 列导致画面错乱
+- 中文输入法全角 `／ｍｏｄｅｌ` 与半角不相等
+
+**结论：不折腾了。回到 `/mp`。**
+
+| 入口 | 说明 |
+|---|---|
+| `/mp` | 分组模型选择窗口 |
+| `Ctrl+Shift+M` | 同上 |
+| 窗口 | 92% 居中 overlay |
+
+窗口内容（实测）：
+
+```
+▸ ccs-codex · Codex 面 (10)
+▸  1  deepseek-v4-flash                600k think,img
+   2  deepseek-v4-flash-0731           600k think,img
+   ...
+   0  kimi-k3                          600k think,img
+1-9 0 选模型 · PgUp/PgDn ← → 换组 · ↑↓ jk 移动
+D 设默认 · < > 翻页 · R 刷新 · 打字=过滤 · Esc 关
+```
+
+### 优化：启动快一倍
+
+`ccswitch-sync.ts` 在扩展工厂函数里 `await sync()`，而 pi 会 `await factory(api)`，
+所以整个同步（含网络请求）都在阻塞启动。
+
+用 `PI_TIMING=1` 实测，工厂耗时 **1955ms**：
+
+```
+ccswitch-sync.ts factory: 1955ms
+```
+
+**改法**
+
+1. `await sync()` 移进 `session_start`（TUI 就绪后才跑）。
+   pi 文档保证初始加载后 `registerProvider` 立即生效。
+2. 加本地缓存 `~/.pi/agent/ccswitch-models-cache.json`：
+   启动时先用缓存**秒注册**，再后台联网刷新。
+
+**效果**
+
+| 指标 | 优化前 | 优化后 |
+|---|---|---|
+| `--list-models` | 2717ms | **1248ms** |
+| `ccswitch-sync` 工厂 | 1955ms | **0ms** |
+| TUI 就绪 | ~2.5s | **~1.6s** |
+
+模型完整性不变（13 个：cc-switch 3 + ccs-codex 10）。
+
 ## 1.2.4
 
 ### 修复：中文输入法开着时 `/model` 打不开

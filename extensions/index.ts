@@ -18,11 +18,37 @@
  * Codex 面用 key 直连中转站的 /models，能拿到该 key 开放的完整列表。
  */
 
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const DB = path.join(os.homedir(), ".cc-switch", "cc-switch.db");
+
+/**
+ * 本地缓存：上次同步到的模型列表。
+ * 启动时先用它秒注册 provider，再后台联网刷新 —— 免得等网络。
+ */
+const CACHE = path.join(os.homedir(), ".pi", "agent", "ccswitch-models-cache.json");
+
+interface CacheEntry { claude: string[]; codex: { baseUrl: string; apiKey: string; models: string[] } }
+
+function readCache(): CacheEntry | undefined {
+  try {
+    return JSON.parse(fs.readFileSync(CACHE, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+function writeCache(e: CacheEntry): void {
+  try {
+    fs.mkdirSync(path.dirname(CACHE), { recursive: true });
+    fs.writeFileSync(CACHE, JSON.stringify(e));
+  } catch {
+    /* 缓存写不了不影响功能 */
+  }
+}
 
 // ─────────────────────────────────────────────────────────────
 //  配置
@@ -277,6 +303,7 @@ export default async function (pi: ExtensionAPI) {
   async function sync(): Promise<string> {
     const keep: string[] = [];
     const parts: string[] = [];
+    const cache: CacheEntry = { claude: [], codex: { baseUrl: "", apiKey: "", models: [] } };
 
     // ── Claude 面 ──
     try {
@@ -291,6 +318,7 @@ export default async function (pi: ExtensionAPI) {
         });
         keep.push(c.id);
         parts.push(`claude=${c.models.length}`);
+        cache.claude = c.models;
       }
     } catch {}
 
@@ -306,6 +334,7 @@ export default async function (pi: ExtensionAPI) {
         });
         keep.push(c.id);
         parts.push(`codex=${c.models.length}`);
+        cache.codex = { baseUrl: c.baseUrl, apiKey: c.apiKey, models: c.models };
       }
     } catch {}
 
@@ -315,15 +344,55 @@ export default async function (pi: ExtensionAPI) {
     }
     registered = keep;
 
+    // 写缓存，下次启动可秒注册
+    if (cache.claude.length || cache.codex.models.length) writeCache(cache);
+
     return parts.length ? parts.join("  ") : "CC Switch 里没有可用的卡";
   }
 
-  // ── 只在启动时同步一次 ──────────────────────────────────
-  try {
-    await sync();
-  } catch {
-    /* 读不到就退回 models.json 里的静态配置 */
-  }
+  // ── 同步：不阻塞启动 ────────────────────────────────────
+  //
+  // pi 会 await 工厂函数，所以这里直接 await sync() 会卡住启动
+  // （实测 1955ms，慢的话要等满 10s 网络超时）。
+  // pi 文档保证：初始加载后调 registerProvider 会立即生效，
+  // 所以放到 session_start（TUI 已就绪）里做。
+  pi.on("session_start", async () => {
+    // ① 先用缓存秒注册 —— 模型立刻可用，不等网络
+    const cached = readCache();
+    if (cached) {
+      try {
+        if (cached.claude.length) {
+          pi.registerProvider(CLAUDE_PROVIDER_ID, {
+            name: "CC Switch · Claude 面",
+            baseUrl: CLAUDE_PROXY_URL,
+            apiKey: CLAUDE_PROXY_KEY,
+            api: "anthropic-messages",
+            models: cached.claude.map((m) => modelMeta(m, CLAUDE_CONTEXT, CLAUDE_MAX_TOKENS)),
+          });
+          registered.push(CLAUDE_PROVIDER_ID);
+        }
+        if (cached.codex.models.length) {
+          pi.registerProvider(CODEX_PROVIDER_ID, {
+            name: `CC Switch · codex …${cached.codex.apiKey.slice(-4)}`,
+            baseUrl: cached.codex.baseUrl,
+            apiKey: cached.codex.apiKey,
+            api: "openai-responses",
+            models: cached.codex.models.map((m) => modelMeta(m, CODEX_CONTEXT, CODEX_MAX_TOKENS)),
+          });
+          registered.push(CODEX_PROVIDER_ID);
+        }
+      } catch {
+        /* 缓存坏了就忽略 */
+      }
+    }
+
+    // ② 再后台联网刷新（覆盖缓存）
+    try {
+      await sync();
+    } catch {
+      /* 读不到就用缓存/静态配置 */
+    }
+  });
 
   // ── 手动重读 ────────────────────────────────────────────
   pi.registerCommand("ccsync", {
