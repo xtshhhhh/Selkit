@@ -1,19 +1,24 @@
 /**
- * Model Picker — 分组模型选择窗口
+ * Model Picker — 赛博朋克风分组模型选择窗口
  *
  * 解决的问题：当 pi 里同时有多个 provider（Claude 面 / Codex 面 / 多个中转站），
  * 内置 /model 是一个扁平长列表，几十条挤在一起。
  *
- * 这个扩展提供 /mp 命令，打开一个居中的浮层窗口：
- *   - 模型按 provider 分组显示，一眼看清哪个面有哪些模型
- *   - 数字键 1-9 / 0 直接选中（不用移动光标）
- *   - PgUp/PgDn 或 ←/→ 切换分组
- *   - D 键把当前项设为 pi 的持久默认模型
+ * 提供的入口：
+ *   /model         → 覆盖内置（拦编辑器提交）
+ *   /mp  /models   → 同一窗口（保底别名）
+ *   Ctrl+L         → 同一窗口（覆盖内置键位）
  *
- * 另外自动维护 settings.json 的 enabledModels，让内置 /model 默认只显示
- * 本扩展管理的 provider，不再混入内置 provider 的一堆模型。
+ * 窗口特性：
+ *   - 左右分栏：左侧模型列表，右侧 COMMAND DECK 指令面板
+ *   - 模型按 provider 分组，每组独立编号框
+ *   - 数字键 1-9 / 0 直接选中，PgUp/PgDn 换组
+ *   - D 把当前项设为 pi 的持久默认模型
+ *   - 模糊过滤（支持 [Cloud]、glm-5.3 这类名字）
  *
- * 依赖：只用到 pi 自带的 pi-tui 组件，无第三方依赖。
+ * 另外自动维护 settings.json 的 enabledModels。
+ *
+ * 依赖：只用 pi 自带组件，无第三方依赖。
  */
 
 import * as fs from "node:fs";
@@ -21,34 +26,36 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder } from "@earendil-works/pi-coding-agent";
-import {
-  Container,
-  type Component,
-  Input,
-  Key,
-  matchesKey,
-  Text,
-  truncateToWidth,
-  visibleWidth,
-} from "@earendil-works/pi-tui";
+import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { type Component, Input, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 // ─────────────────────────────────────────────────────────────
 //  配置
 // ─────────────────────────────────────────────────────────────
 
-/** 每组最多显示多少个；超过则分页。 */
+/** 每组每页最多显示多少个。 */
 const PAGE_SIZE = 10;
 
-/** 单行里模型名的最大显示宽度（超过截断）。 */
-const NAME_MAX = 46;
+/** 右侧指令面板宽度（列）。 */
+const DECK_WIDTH = 25;
+
+/** 终端宽度小于此值时隐藏右侧指令面板（自适应）。 */
+const DECK_MIN_TERM_WIDTH = 100;
 
 /**
  * 自动写入 settings.json 的 enabledModels。
- * 用通配符，所以 CC Switch 换卡后模型名变了也不会失效。
+ * 用通配符 —— CC Switch 换卡后模型名变了也不失效。
  * 设为 undefined 则完全不碰 settings.json。
  */
 const ENABLED_PATTERNS: string[] | undefined = ["cc-switch/*", "ccs-codex/*"];
+
+/**
+ * 是否覆盖内置 /model。
+ * true  → /model 打开本窗口
+ * false → /model 保持 pi 原生；用 /mp 或 Ctrl+L
+ * 升级 pi 后若输入框异常，改成 false 即可恢复。
+ */
+const OVERRIDE_MODEL_COMMAND = true;
 
 // ─────────────────────────────────────────────────────────────
 //  settings.json
@@ -64,23 +71,21 @@ function settingsPath(): string {
   return path.join(agentDir(), "settings.json");
 }
 
-/** 读 settings.json；坏文件返回 null（不动它）。 */
 function readSettings(): Record<string, any> | null {
   try {
-    const raw = fs.readFileSync(settingsPath(), "utf8");
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(fs.readFileSync(settingsPath(), "utf8"));
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
     return null;
   }
 }
 
-/** 原子写 settings.json，写前留一份 .bak。 */
+/** 原子写，写前留 .bak；坏文件不覆盖。 */
 function writeSettings(next: Record<string, any>): boolean {
   const p = settingsPath();
   try {
     const current = readSettings();
-    if (current === null) return false; // 坏文件不覆盖
+    if (current === null) return false;
     fs.writeFileSync(p + ".bak", JSON.stringify(current, null, 2) + "\n");
     fs.writeFileSync(p, JSON.stringify(next, null, 2) + "\n");
     return true;
@@ -89,7 +94,6 @@ function writeSettings(next: Record<string, any>): boolean {
   }
 }
 
-/** 需要时才写 enabledModels（避免每次启动都动文件）。 */
 function syncEnabledModels(): void {
   if (!ENABLED_PATTERNS) return;
   const s = readSettings();
@@ -104,7 +108,6 @@ function syncEnabledModels(): void {
   writeSettings(s);
 }
 
-/** 持久设默认模型（写 defaultProvider + defaultModel）。 */
 function saveDefaultModel(provider: string, modelId: string): boolean {
   const s = readSettings();
   if (!s) return false;
@@ -114,16 +117,11 @@ function saveDefaultModel(provider: string, modelId: string): boolean {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  数据分组
+//  数据
 // ─────────────────────────────────────────────────────────────
 
-type Group = {
-  provider: string;
-  label: string;
-  models: Model<Api>[];
-};
+type Group = { provider: string; label: string; models: Model<Api>[] };
 
-/** 给 provider 起个短名字。 */
 function providerLabel(provider: string, sample: Model<Api> | undefined): string {
   if (provider === "cc-switch") return "Claude 面";
   if (provider === "ccs-codex") return "Codex 面";
@@ -134,7 +132,6 @@ function providerLabel(provider: string, sample: Model<Api> | undefined): string
   return "";
 }
 
-/** 按 provider 分组，当前模型的组排最前。 */
 function buildGroups(models: Model<Api>[], current: Model<Api> | undefined): Group[] {
   const byProvider = new Map<string, Model<Api>[]>();
   for (const m of models) {
@@ -142,15 +139,12 @@ function buildGroups(models: Model<Api>[], current: Model<Api> | undefined): Gro
     if (list) list.push(m);
     else byProvider.set(m.provider, [m]);
   }
-
   const groups: Group[] = [];
   for (const [provider, list] of byProvider) {
     list.sort((a, b) => a.id.localeCompare(b.id));
     groups.push({ provider, label: providerLabel(provider, list[0]), models: list });
   }
   groups.sort((a, b) => a.provider.localeCompare(b.provider));
-
-  // 当前模型所在组提到最前
   if (current) {
     const i = groups.findIndex((g) => g.provider === current.provider);
     if (i > 0) groups.unshift(...groups.splice(i, 1));
@@ -158,7 +152,7 @@ function buildGroups(models: Model<Api>[], current: Model<Api> | undefined): Gro
   return groups;
 }
 
-/** 大小写不敏感的模糊匹配（子序列）。 */
+/** 子序列模糊匹配。 */
 function fuzzy(haystack: string, needle: string): boolean {
   if (!needle) return true;
   const h = haystack.toLowerCase();
@@ -172,16 +166,42 @@ function fuzzy(haystack: string, needle: string): boolean {
   return true;
 }
 
-/** 上下文长度显示：200000 → 200k, 1000000 → 1M */
 function fmtContext(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "";
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(n % 1_000_000 ? 1 : 0) + "M";
-  if (n >= 1000) return Math.round(n / 1000) + "k";
+  if (n >= 1000) return Math.round(n / 1000) + "K";
   return String(n);
 }
 
+/** 只用单宽字符，避免 CJK 宽度问题。 */
+const G = {
+  cursor: "▸",
+  active: "◉",
+  blank: " ",
+  think: "◈",
+  image: "◆",
+  block: "▓",
+  light: "░",
+} as const;
+
 // ─────────────────────────────────────────────────────────────
-//  窗口组件
+//  主题桥
+// ─────────────────────────────────────────────────────────────
+
+type ThemeLike = { fg(color: string, text: string): string; bold(text: string): string };
+
+// 默认直通，open() 时换成真实 theme
+let T: ThemeLike = { fg: (_c, t) => t, bold: (t) => t };
+
+const neon = (s: string) => T.fg("borderAccent", s);
+const cyan = (s: string) => T.fg("mdLink", s);
+const dim = (s: string) => T.fg("dim", s);
+const accent = (s: string) => T.fg("accent", s);
+const warn = (s: string) => T.fg("warning", s);
+const ok = (s: string) => T.fg("success", s);
+
+// ─────────────────────────────────────────────────────────────
+//  窗口
 // ─────────────────────────────────────────────────────────────
 
 type PickerResult =
@@ -191,13 +211,25 @@ type PickerResult =
 
 type PickerOptions = {
   allModels: Model<Api>[];
-  current: Model<Api> | undefined;
-  /** 进入时 Enter 是否等同于设为默认。 */
   enterSetsDefault: boolean;
-  onDone: (result: PickerResult) => void;
+  onDone: (r: PickerResult) => void;
   onRefresh: () => Promise<Model<Api>[]>;
-  onScopeToggle?: () => void;
+  getCurrent: () => Model<Api> | undefined;
 };
+
+/** 显示宽度感知的补齐/截断。 */
+function fit(s: string, width: number): string {
+  if (width <= 0) return "";
+  const vis = visibleWidth(s);
+  if (vis > width) return truncateToWidth(s, width);
+  return s + " ".repeat(width - vis);
+}
+
+function fill(ch: string, width: number): string {
+  if (width <= 0) return "";
+  const w = Math.max(1, visibleWidth(ch));
+  return ch.repeat(Math.max(0, Math.floor(width / w)));
+}
 
 class ModelPicker implements Component {
   private readonly opts: PickerOptions;
@@ -205,14 +237,14 @@ class ModelPicker implements Component {
   private groups: Group[];
   private groupIndex = 0;
   private pageIndex = 0;
-  private cursor = 0; // 组内高亮下标
+  private cursor = 0;
   private status = "";
   private busy = false;
   private _focused = true;
 
   constructor(opts: PickerOptions) {
     this.opts = opts;
-    this.filterInput = new Input({ placeholder: "filter…" });
+    this.filterInput = new Input({ prompt: "▸ ", placeholder: "type to filter…" });
     this.filterInput.focused = true;
     this.filterInput.onEscape = () => this.opts.onDone({ kind: "cancel" });
     this.filterInput.onSubmit = () => this.selectCursor();
@@ -232,30 +264,27 @@ class ModelPicker implements Component {
     this.filterInput.invalidate();
   }
 
-  /** 按当前过滤器重建分组。 */
   private rebuild(): Group[] {
     const q = this.filterInput.getValue().trim();
     const matched = q
       ? this.opts.allModels.filter((m) => fuzzy(m.id, q) || fuzzy(m.provider, q))
       : this.opts.allModels;
-    return buildGroups(matched, this.opts.current);
+    return buildGroups(matched, this.opts.getCurrent());
   }
 
-  /** 组内页数。 */
   private pageCount(i = this.groupIndex): number {
     const g = this.groups[i];
     if (!g) return 1;
     return Math.max(1, Math.ceil(g.models.length / PAGE_SIZE));
   }
 
-  /** 当前页的模型（含全局序号）。 */
   private pageModels(): { model: Model<Api>; num: number; localIndex: number }[] {
     const g = this.groups[this.groupIndex];
     if (!g) return [];
     const start = this.pageIndex * PAGE_SIZE;
     return g.models.slice(start, start + PAGE_SIZE).map((model, i) => ({
       model,
-      num: i + 1, // 页内序号 1-10
+      num: i + 1,
       localIndex: start + i,
     }));
   }
@@ -270,42 +299,39 @@ class ModelPicker implements Component {
     this.groupIndex = Math.min(Math.max(0, this.groupIndex), this.groups.length - 1);
     const pc = this.pageCount();
     this.pageIndex = Math.min(Math.max(0, this.pageIndex), pc - 1);
-    const g = this.groups[this.groupIndex];
-    this.cursor = Math.min(Math.max(0, this.cursor), Math.max(0, g.models.length - 1));
+    this.cursor = Math.min(
+      Math.max(0, this.cursor),
+      Math.max(0, this.groups[this.groupIndex].models.length - 1),
+    );
+  }
+
+  private finish(model: Model<Api>, forceDefault = false): void {
+    const asDefault = forceDefault || this.opts.enterSetsDefault;
+    this.opts.onDone(asDefault ? { kind: "default", model } : { kind: "select", model });
   }
 
   private selectCursor(): void {
-    const g = this.groups[this.groupIndex];
-    const m = g?.models[this.cursor];
-    if (!m) return;
-    this.opts.onDone(
-      this.opts.enterSetsDefault ? { kind: "default", model: m } : { kind: "select", model: m },
-    );
+    const m = this.groups[this.groupIndex]?.models[this.cursor];
+    if (m) this.finish(m);
   }
 
   private setDefaultCursor(): void {
-    const g = this.groups[this.groupIndex];
-    const m = g?.models[this.cursor];
-    if (!m) return;
-    this.opts.onDone({ kind: "default", model: m });
+    const m = this.groups[this.groupIndex]?.models[this.cursor];
+    if (m) this.finish(m, true);
   }
 
-  /** 按页内序号选（1-10；10 用 0 键）。 */
+  /** 按页内序号选（1-10；10 用 0）。 */
   private selectByNumber(n: number): void {
     const g = this.groups[this.groupIndex];
     if (!g) return;
-    const start = this.pageIndex * PAGE_SIZE;
-    const target = start + n - 1;
+    const target = this.pageIndex * PAGE_SIZE + n - 1;
     const m = g.models[target];
     if (!m) {
-      this.status = `第 ${n} 项不存在`;
+      this.status = `// ERR >> 第 ${n} 项不存在`;
       return;
     }
-    // 把光标也同步过去，这样紧接着按 D 不会选错
-    this.cursor = target;
-    this.opts.onDone(
-      this.opts.enterSetsDefault ? { kind: "default", model: m } : { kind: "select", model: m },
-    );
+    this.cursor = target; // 同步光标，紧接着按 D 不会错
+    this.finish(m);
   }
 
   private moveGroup(delta: number): void {
@@ -321,8 +347,7 @@ class ModelPicker implements Component {
     const pc = this.pageCount();
     this.pageIndex = (this.pageIndex + delta + pc) % pc;
     const start = this.pageIndex * PAGE_SIZE;
-    const g = this.groups[this.groupIndex];
-    this.cursor = Math.min(start, Math.max(0, g.models.length - 1));
+    this.cursor = Math.min(start, Math.max(0, this.groups[this.groupIndex].models.length - 1));
     this.status = "";
   }
 
@@ -331,13 +356,11 @@ class ModelPicker implements Component {
     if (!g || g.models.length === 0) return;
     const n = g.models.length;
     this.cursor = (this.cursor + delta + n) % n;
-    // 跟随到对应页
     this.pageIndex = Math.floor(this.cursor / PAGE_SIZE);
     this.status = "";
   }
 
   handleInput(data: string): void {
-    // 过滤框非空时，大多数按键都当输入处理（否则没法搜 "glm-5.3"、"[Cloud]"）
     const filtering = this.filterInput.getValue() !== "";
 
     // ── 两种模式都生效 ──
@@ -358,7 +381,7 @@ class ModelPicker implements Component {
     if (matchesKey(data, Key.up)) return this.moveCursor(-1);
     if (matchesKey(data, Key.down)) return this.moveCursor(1);
 
-    // ── 只有过滤框为空时才是「命令键」──
+    // ── 仅当过滤框为空时这些才是命令键 ──
     if (!filtering) {
       if (/^[1-9]$/.test(data)) return this.selectByNumber(Number(data));
       if (data === "0") return this.selectByNumber(10);
@@ -369,30 +392,25 @@ class ModelPicker implements Component {
       if (matchesKey(data, Key.left)) return this.moveGroup(-1);
       if (matchesKey(data, Key.right)) return this.moveGroup(1);
 
-      // ── 动作 ──
       if (data === "D") return this.setDefaultCursor();
       if (data === "R") {
         if (this.busy) return;
         this.busy = true;
-        this.status = "刷新中…";
+        this.status = "// RESYNC >> 同步中…";
         void this.opts
           .onRefresh()
           .then((models) => {
             this.opts.allModels = models;
             this.groups = this.rebuild();
             this.clamp();
-            this.status = `已刷新（${models.length} 个模型）`;
+            this.status = `// RESYNC >> OK  ${models.length} 个模型`;
           })
           .catch((e) => {
-            this.status = `刷新失败：${e instanceof Error ? e.message : String(e)}`;
+            this.status = `// RESYNC >> FAIL  ${e instanceof Error ? e.message : String(e)}`;
           })
           .finally(() => {
             this.busy = false;
           });
-        return;
-      }
-      if (data === "S") {
-        this.opts.onScopeToggle?.();
         return;
       }
     }
@@ -411,94 +429,137 @@ class ModelPicker implements Component {
 
   // ── 渲染 ──
 
-  private hr(width: number, ch = "─"): string {
-    return ch.repeat(Math.max(0, width));
-  }
-
-  /** 把一个字符串按显示宽度补/截到 width。 */
-  private fit(s: string, width: number, padChar = " "): string {
-    const vis = visibleWidth(s);
-    if (vis > width) return truncateToWidth(s, width);
-    return s + padChar.repeat(width - vis);
-  }
-
   render(width: number): string[] {
-    const out: string[] = [];
-    const inner = Math.max(20, width - 2);
-    const pad = " ";
+    const hasDeck = width >= DECK_MIN_TERM_WIDTH;
+    const deckW = hasDeck ? DECK_WIDTH : 0;
+    // 布局: ╔ + 左栏(leftW) + [│ + deckW] + ╗  =  totalW
+    const totalW = Math.max(12, width);
+    const leftW = hasDeck ? totalW - 2 - deckW - 1 : Math.max(4, totalW - 2);
 
-    const line = (content: string) => out.push(pad + this.fit(content, inner) + pad);
-    const rule = () => out.push(pad + this.hr(inner) + pad);
-
-    // ── 顶栏 ──
     const g = this.groups[this.groupIndex];
     const pc = this.pageCount();
-    const pageInfo = pc > 1 ? `  页 ${this.pageIndex + 1}/${pc}` : "";
-    const groupInfo = this.groups.length ? `  组 ${this.groupIndex + 1}/${this.groups.length}` : "";
-    line(`Model Picker${groupInfo}${pageInfo}`);
+    const cur = this.opts.getCurrent();
 
-    // ── 搜索框（Input.render 自带 "> " 提示符和光标）──
-    rule();
-    const inputLine = this.filterInput.render(inner)[0] ?? "";
-    out.push(pad + this.fit(" ", 0) + inputLine + pad);
-    rule();
+    // ── 左栏（不含外框）──
+    const L: string[] = [];
+    {
+      const title = " MODEL PICKER ";
+      const sys = "SYS ▸ ONLINE ";
+      const node = `NODE ${this.groupIndex + 1}/${Math.max(1, this.groups.length)} `;
+      const head = "═";
+      const used = visibleWidth(head) + visibleWidth(title) + visibleWidth(sys) + visibleWidth(node);
+      if (leftW - used >= 4) {
+        L.push(neon(head) + accent(T.bold(title)) + neon(fill("═", leftW - used)) + cyan(sys) + neon(node));
+      } else {
+        const t = truncateToWidth(title, Math.max(4, leftW - 3));
+        L.push(neon(head) + accent(T.bold(t)) + neon(fill("═", leftW - 1 - visibleWidth(t))));
+      }
+    }
+    L.push(dim(fill("─", leftW)));
 
     if (!g) {
-      line("没有匹配的模型");
-      rule();
-      line("Esc 关闭");
-      return out;
+      L.push(dim("  // NO MATCH  没有匹配的模型"));
+      L.push(dim("  // Esc 清空过滤 / 关闭"));
+    } else {
+      const lab = g.label ? ` ${g.label}` : "";
+      const headPlain = "┌─[ " + g.provider + " ]" + lab + ` (${g.models.length})`;
+      L.push(
+        neon("┌─[") + " " + accent(g.provider) + " " + neon("]") + cyan(lab) +
+          dim(` (${g.models.length})`) +
+          dim(fill("─", Math.max(0, leftW - visibleWidth(headPlain) - 1))) + neon("┐"),
+      );
+
+      const rightW = 12;
+      const nameW = Math.max(8, leftW - 4 - rightW);
+      for (const { model, num, localIndex } of this.pageModels()) {
+        const isCursor = localIndex === this.cursor;
+        const isCur = cur && cur.provider === model.provider && cur.id === model.id;
+        const keyLabel = num === 10 ? "0" : String(num);
+        const marker = isCur ? G.active : isCursor ? G.cursor : G.blank;
+        const tags = (model.reasoning ? G.think : " ") + (model.input?.includes("image") ? G.image : " ");
+        const right = fmtContext(model.contextWindow) + " " + tags;
+        const raw = `${marker} ${keyLabel.padStart(2)}  ${model.id}`;
+        const shown = truncateToWidth(raw, nameW);
+        const painted = isCur ? ok(shown) : isCursor ? accent(shown) : cyan(shown);
+        const inner = painted + " ".repeat(Math.max(1, nameW - visibleWidth(shown))) + dim(fit(right, rightW));
+        L.push((isCursor ? neon("▐") : dim("│")) + fit(inner, leftW - 2) + (isCursor ? neon("▌") : dim("│")));
+      }
+      L.push(neon("└") + dim(fill("─", leftW - 2)) + neon("┘"));
     }
 
-    // ── 组标题 ──
-    const label = g.label ? ` · ${g.label}` : "";
-    const count = `(${g.models.length})`;
-    line(`▸ ${g.provider}${label} ${count}`);
+    L.push(dim(fill("─", leftW)));
 
-    // ── 模型列表 ──
-    const page = this.pageModels();
-    for (const { model, num, localIndex } of page) {
-      const isCursor = localIndex === this.cursor;
-      const isCurrent =
-        this.opts.current &&
-        this.opts.current.provider === model.provider &&
-        this.opts.current.id === model.id;
-
-      const keyLabel = num === 10 ? "0" : String(num);
-      const marker = isCurrent ? "●" : isCursor ? "▸" : " ";
-      const ctx = fmtContext(model.contextWindow);
-      const tags: string[] = [];
-      if (model.reasoning) tags.push("think");
-      if (model.input?.includes("image")) tags.push("img");
-
-      const left = `${marker} ${keyLabel.padStart(2)}  ${model.id}`;
-      const right = [ctx, tags.join(",")].filter(Boolean).join(" ");
-
-      const avail = inner - right.length - 3;
-      const leftFit = avail > 4 ? truncateToWidth(left, avail) : left;
-      line(leftFit + " ".repeat(Math.max(1, avail - visibleWidth(leftFit))) + right);
+    if (g) {
+      const startIdx = this.pageIndex * PAGE_SIZE;
+      const pos = Math.min(g.models.length, Math.max(1, this.cursor - startIdx + 1));
+      const barW = Math.max(6, leftW - 34);
+      const filledW = Math.max(0, Math.round((pos / Math.max(1, g.models.length)) * barW));
+      const bar = neon(fill(G.block, filledW)) + dim(fill(G.light, barW - filledW));
+      L.push(dim(`[${pos}/${g.models.length}] `) + bar + dim(`  FILTER ${this.filterInput.getValue() ? "ON" : "OFF"}`));
     }
 
-    if (pc > 1) {
-      line(`  <  > 翻页（本组共 ${g.models.length} 个）`);
+    if (this.status) L.push(warn(" " + this.status));
+
+    // ── 右栏（不含外框）──
+    const R: string[] = [];
+    if (hasDeck) {
+      R.push(accent("═ COMMAND DECK "));
+      const row = (k: string, v: string) => cyan(" " + k) + dim("  " + v);
+      for (const [k, v] of [
+        ["1-9 0", "选择模型"],
+        ["PgUp/Dn", "切换分组"],
+        ["←  →", "切换分组"],
+        ["↑  ↓", "移动光标"],
+        ["j  k", "移动光标"],
+        ["<  >", "组内翻页"],
+        ["Enter", "确认选择"],
+        ["D", "设为默认"],
+        ["R", "重新同步"],
+        ["Esc", "关闭窗口"],
+      ] as [string, string][]) {
+        R.push(row(k, v));
+      }
+      R.push(dim(fill("─", deckW)));
+      R.push(accent(" ░ STATUS ░"));
+      R.push(dim("  当前"));
+      R.push(dim("  " + (cur ? truncateToWidth(cur.id, deckW - 4) : "—")));
+      R.push(row("总数", String(this.opts.allModels.length)));
+      R.push(row("分组", String(this.groups.length)));
+      R.push(row("页码", pc > 1 ? `${this.pageIndex + 1}/${pc}` : "—"));
     }
 
-    // ── 状态 ──
-    if (this.status) {
-      rule();
-      line(this.status);
+    // ── 拼装 ──
+    const head = L.shift() ?? "";
+    L.pop(); // 丢弃左栏最后的分隔线（底栏另画）
+    if (L.length > 0 && L[L.length - 1] === undefined) L.pop();
+
+    const rows = Math.max(L.length, R.length);
+    const out: string[] = [neon("╔") + fit(head, leftW) + (hasDeck ? neon("╤") + dim(fill("═", deckW)) : "") + neon("╗")];
+
+    for (let i = 0; i < rows; i++) {
+      out.push(
+        neon("║") + fit(L[i] ?? "", leftW) + (hasDeck ? neon("│") + fit(R[i] ?? "", deckW) : "") + neon("║"),
+      );
     }
 
-    // ── 帮助 ──
-    rule();
-    line("过滤框空: 1-9 0 选模型 · PgUp/PgDn ← → 换组 · ↑↓ jk 移动");
-    line(
-      this.opts.enterSetsDefault
-        ? "D 设默认 · < > 翻页 · R 刷新 · 打字=过滤 · Enter 确认 · Esc 关"
-        : "D 设默认 · < > 翻页 · R 刷新 · 打字=过滤 · Esc 关",
+    const foot = "▓▒░ cyberspace model selector ░▒▓";
+    const footShown = truncateToWidth(foot, Math.max(4, leftW - 2));
+    out.push(
+      neon("╚═") + dim(footShown) + neon(fill("═", Math.max(0, leftW - 2 - visibleWidth(footShown)))) +
+        (hasDeck ? neon("╧") + dim(fill("═", deckW)) : "") + neon("╝"),
     );
 
     return out;
+  }
+
+  snapshot() {
+    return {
+      groups: this.groups,
+      groupIndex: this.groupIndex,
+      pageIndex: this.pageIndex,
+      cursor: this.cursor,
+      filter: this.filterInput.getValue(),
+    };
   }
 }
 
@@ -507,7 +568,6 @@ class ModelPicker implements Component {
 // ─────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  /** 打开窗口。enterSetsDefault: 直接按 Enter 就是设默认。 */
   async function open(ctx: ExtensionContext, enterSetsDefault: boolean): Promise<void> {
     if (ctx.mode !== "tui") {
       ctx.ui.notify("Model Picker 需要交互模式（TUI）", "warning");
@@ -523,46 +583,30 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (allModels.length === 0) {
-      ctx.ui.notify("没有可用的模型（检查 provider 是否配置了凭据）", "warning");
+      ctx.ui.notify("没有可用模型（检查 provider 凭据）", "warning");
       return;
     }
 
     const result = await ctx.ui.custom<PickerResult>(
       (tui, theme, _kb, done) => {
+        T = theme as unknown as ThemeLike;
         const picker = new ModelPicker({
           allModels,
-          current: ctx.model as Model<Api> | undefined,
           enterSetsDefault,
+          getCurrent: () => ctx.model as Model<Api> | undefined,
           onDone: (r) => done(r),
           onRefresh: async () => {
             await ctx.modelRegistry.refresh();
             return ctx.modelRegistry.getAvailable();
           },
-          onScopeToggle: () => {
-            ctx.ui.notify("scope 由 settings.json 的 enabledModels 控制（可用 /scoped-models 调整）", "info");
-          },
         });
-
-        const header = new Container();
-        header.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-        header.addChild(new Text(theme.fg("accent", theme.bold("  Model Picker")), 0, 0));
-
-        const footer = new Container();
-        footer.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-
         return {
           focused: true,
           render(w: number): string[] {
-            return [
-              ...header.render(w),
-              ...picker.render(w),
-              ...footer.render(w),
-            ];
+            return picker.render(w);
           },
           invalidate() {
-            header.invalidate();
             picker.invalidate();
-            footer.invalidate();
           },
           handleInput(data: string) {
             picker.handleInput(data);
@@ -570,60 +614,81 @@ export default function (pi: ExtensionAPI) {
           },
         } as Component & { focused: boolean };
       },
-      {
-        overlay: true,
-        overlayOptions: {
-          width: "80%",
-          maxHeight: "85%",
-          anchor: "center",
-        },
-      },
+      { overlay: true, overlayOptions: { width: "92%", maxHeight: "92%", anchor: "center" } },
     );
 
     if (!result || result.kind === "cancel") return;
-
     const model = result.model;
 
     if (result.kind === "default") {
-      const ok = saveDefaultModel(model.provider, model.id);
+      const wrote = saveDefaultModel(model.provider, model.id);
       const set = await pi.setModel(model);
       if (!set) {
         ctx.ui.notify(`没有 ${model.provider}/${model.id} 的凭据`, "error");
         return;
       }
       ctx.ui.notify(
-        ok
-          ? `默认模型：${model.provider}/${model.id}`
-          : `已切换，但写 settings.json 失败`,
-        ok ? "info" : "warning",
+        wrote ? `默认模型 → ${model.provider}/${model.id}` : "已切换，但写 settings.json 失败",
+        wrote ? "info" : "warning",
       );
       return;
     }
 
-    const ok = await pi.setModel(model);
-    if (!ok) {
+    const set = await pi.setModel(model);
+    if (!set) {
       ctx.ui.notify(`没有 ${model.provider}/${model.id} 的凭据`, "error");
       return;
     }
-    ctx.ui.notify(`模型：${model.provider}/${model.id}`, "info");
+    ctx.ui.notify(`模型 → ${model.provider}/${model.id}`, "info");
   }
 
-  pi.registerCommand("mp", {
-    description: "分组模型选择窗口（数字键选择，PgUp/PgDn 换组）",
-    handler: async (args, ctx) => {
-      const wantDefault = (args ?? "").trim().toLowerCase() === "default";
-      await open(ctx, wantDefault);
-    },
-  });
+  const handler = async (args: string, ctx: ExtensionContext) => {
+    await open(ctx, (args ?? "").trim().toLowerCase() === "default");
+  };
 
+  pi.registerCommand("mp", { description: "赛博朋克风分组模型选择窗口", handler });
+  pi.registerCommand("models", { description: "同 /mp（保底别名）", handler });
+
+  // 覆盖内置 Ctrl+L（内置无 restrictOverride，扩展优先）
+  pi.registerShortcut("ctrl+l", {
+    description: "Model Picker（覆盖内置选择器）",
+    handler: async (ctx) => open(ctx, false),
+  });
   pi.registerShortcut("ctrl+shift+m", {
     description: "Model Picker（分组模型选择窗口）",
-    handler: async (ctx) => {
-      await open(ctx, false);
-    },
+    handler: async (ctx) => open(ctx, false),
   });
 
-  // 启动时维护 enabledModels，让内置 /model 默认只显示本扩展管的 provider
+  // ── 覆盖 /model：拦编辑器提交 ──
+  // 注意：pi 的 setCustomEditorComponent 会在工厂返回后覆盖 onSubmit，
+  // 所以必须在 handleInput 里拦 Enter，不能改 onSubmit。
+  if (OVERRIDE_MODEL_COMMAND) {
+    pi.on("session_start", async (_e, ctx) => {
+      if (ctx.mode !== "tui") return;
+      try {
+        ctx.ui.setEditorComponent((tui, theme, keybindings) => {
+          const ed = new CustomEditor(tui, theme, keybindings);
+          const superHandle = ed.handleInput.bind(ed);
+          ed.handleInput = (data: string) => {
+            // 只在「按 Enter」且「文本正好是 /model」时截胡
+            if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
+              const t = ed.getText().trim();
+              if (t === "/model" || t.startsWith("/model ")) {
+                ed.setText("");
+                void open(ctx, false);
+                return;
+              }
+            }
+            superHandle(data);
+          };
+          return ed;
+        });
+      } catch {
+        /* 换编辑器失败 → 退回 /mp */
+      }
+    });
+  }
+
   pi.on("session_start", async () => {
     try {
       syncEnabledModels();

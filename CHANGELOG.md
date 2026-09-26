@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.2.0
+
+### 新增
+
+- **覆盖内置 /model**：靠 `setEditorComponent` 拦截提交（pi 会在工厂返回后覆盖 onSubmit，所以拦的是 handleInput 里的 Enter）
+- **覆盖内置 Ctrl+L**：内置键位没有 restrictOverride，扩展快捷键优先
+- 窗口重做为赛博朋克风：双线边框、霓虹色、左右分栏
+- **右侧 COMMAND DECK 指令面板**：按键表 + 实时状态（当前模型 / 总数 / 分组 / 页码）
+- **自适应**：终端宽度 < 100 列时自动隐藏右侧面板
+- 保底别名 `/models`（万一 /model 覆盖出问题）
+- 开关 `OVERRIDE_MODEL_COMMAND`，设为 false 即可恢复 pi 原生 /model
+
+### 修复
+
+- 渲染溢出：左右分栏按显示宽度精确计算，20-140 列全部不超框
+- 模型行光标用半边块字符代替竖线时多出 2 列的问题
+
 ## 1.1.0
 
 ### 新增
