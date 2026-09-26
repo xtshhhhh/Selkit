@@ -542,10 +542,14 @@ class ModelPicker implements Component {
       );
     }
 
+    // 底部边框宽度必须与内容行完全相等，否则终端重绘会错位。
+    // 内容行 = ║ + leftW + │ + deckW + ║      = leftW + deckW + 3
+    // 底部行 = ╚═ + foot + fill + ╧ + deckW + ╝ = foot + fill + deckW + 4
+    // 令两者相等 → fill = leftW - foot - 1
     const foot = "▓▒░ cyberspace model selector ░▒▓";
     const footShown = truncateToWidth(foot, Math.max(4, leftW - 2));
     out.push(
-      neon("╚═") + dim(footShown) + neon(fill("═", Math.max(0, leftW - 2 - visibleWidth(footShown)))) +
+      neon("╚═") + dim(footShown) + neon(fill("═", Math.max(0, leftW - 1 - visibleWidth(footShown)))) +
         (hasDeck ? neon("╧") + dim(fill("═", deckW)) : "") + neon("╝"),
     );
 
@@ -614,7 +618,7 @@ export default function (pi: ExtensionAPI) {
           },
         } as Component & { focused: boolean };
       },
-      { overlay: true, overlayOptions: { width: "92%", maxHeight: "92%", anchor: "center" } },
+      { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", anchor: "top-left", margin: 0 } },
     );
 
     if (!result || result.kind === "cancel") return;
