@@ -1,0 +1,32 @@
+{
+  "name": "pi-ccswitch-sync",
+  "version": "1.0.0",
+  "description": "Sync CC Switch relays (Claude / Codex faces) into pi as model providers, following the currently selected card.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "cc-switch",
+    "ccswitch",
+    "provider",
+    "relay"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  }
+}
