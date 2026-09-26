@@ -55,17 +55,9 @@ const CLAUDE_PROXY_KEY = "cc-switch-local";
 const FETCH_TIMEOUT_MS = 10_000;
 
 /** 模型元数据（中转站不可信，统一给宽值）。 */
-/**
- * 全局上下文上限（路线 1：按需求统一设 600K）。
- * 注意：这是 pi 账本上的数字，上游真实上限未必有这么高。
- *   cc-switch（Claude 面）真实 200K
- *   ccs-codex（Codex 面）真实 400K
- */
-const CONTEXT_WINDOW = 600_000;
-
-const CODEX_CONTEXT = CONTEXT_WINDOW;
+const CODEX_CONTEXT = 400_000;
 const CODEX_MAX_TOKENS = 128_000;
-const CLAUDE_CONTEXT = CONTEXT_WINDOW;
+const CLAUDE_CONTEXT = 200_000;
 const CLAUDE_MAX_TOKENS = 64_000;
 
 // ─────────────────────────────────────────────────────────────

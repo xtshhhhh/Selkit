@@ -191,35 +191,3 @@ ccs-codex-api-deepseek-com  ...
 ## 许可
 
 MIT
-
-## 推荐设置：上下文与自动压缩
-
-本扩展把模型上下文窗口统一定为 **600K**。要配合压缩设置，在你的
-`~/.pi/agent/settings.json` 里加：
-
-```json
-"compaction": {
-  "enabled": true,
-  "reserveTokens": 280000,
-  "keepRecentTokens": 50000
-}
-```
-
-**触发点 = contextWindow − reserveTokens**（pi 源码 `compaction.js`）：
-
-    contextTokens > 600000 - 280000  →  即超过 320K 时自动压缩
-
-保留最近 `keepRecentTokens`（50K）不压缩，其余交给 LLM 摘要。
-
-想让它更早压缩就调大 `reserveTokens`：
-
-| 想要触发点 | reserveTokens |
-|---|---|
-| 200K | 400000 |
-| 320K | 280000 |
-| 400K | 200000 |
-| 500K | 100000 |
-
-> **注意**：600K 是 pi 账本上的数字，上游真实上限未必有这么高。
-> 超出上游真实上限时会收到 provider 的 context overflow 错误，
-> 此时应调大 `reserveTokens` 让压缩提前触发。

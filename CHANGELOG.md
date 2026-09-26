@@ -1,31 +1,5 @@
 # Changelog
 
-## 1.2.1
-
-### 变更
-
-- 模型上下文窗口统一设为 **600K**（路线 1：按需字面设置）
-- 新增常量 `CONTEXT_WINDOW`，Claude 面与 Codex 面共用
-
-### 配套的 settings.json 压缩设置
-
-```json
-"compaction": {
-  "reserveTokens": 280000,
-  "keepRecentTokens": 50000
-}
-```
-
-对应触发点 = 600000 − 280000 = **320000** 时自动压缩。
-
-> 计算公式（源码 `compaction.js`）：`contextTokens > contextWindow - reserveTokens`
-
-### 注意
-
-这是 pi 账本上的数字，上游真实上限未必有这么高
-（`cc-switch` 真实 200K，`ccs-codex` 真实 400K）。
-超出上游真实上限时仍会收到 provider 的 context overflow 错误。
-
 ## 1.2.0
 
 ### 新增
