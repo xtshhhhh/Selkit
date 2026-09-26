@@ -57,6 +57,23 @@ const ENABLED_PATTERNS: string[] | undefined = ["cc-switch/*", "ccs-codex/*"];
  */
 const OVERRIDE_MODEL_COMMAND = true;
 
+/**
+ * 全角 → 半角归一化。
+ * 中文输入法开着时打 /model 会变成 ／ｍｏｄｅｌ（U+FF0F…），
+ * 直接比较会不相等。这里把全角 ASCII（U+FF01..U+FF5E）与全角空格转回半角。
+ */
+function normalizeCommand(s: string): string {
+  return [...s]
+    .map((ch) => {
+      const c = ch.codePointAt(0) ?? 0;
+      if (c >= 0xff01 && c <= 0xff5e) return String.fromCharCode(c - 0xfee0);
+      if (c === 0x3000) return " ";
+      return ch;
+    })
+    .join("")
+    .trim();
+}
+
 // ─────────────────────────────────────────────────────────────
 //  settings.json
 // ─────────────────────────────────────────────────────────────
@@ -604,6 +621,14 @@ export default function (pi: ExtensionAPI) {
             return ctx.modelRegistry.getAvailable();
           },
         });
+        // ── 终端会把 Enter 发成 \r\n 两个字节 ──
+        // 第一个字节（\r）被编辑器层截住、开窗；第二个（\n）这时已经
+        // 落到窗口上，会被当成确认键 —— 结果是「开一下就关」。
+        // 所以刚开窗的头 200ms 内丢弃 Enter 类字节。
+        const openedAt = Date.now();
+        const isEnter = (d: string) =>
+          d === "\r" || d === "\n" || d === "\u001b[13u" || d === "\u001b[13;1u";
+
         return {
           focused: true,
           render(w: number): string[] {
@@ -613,12 +638,13 @@ export default function (pi: ExtensionAPI) {
             picker.invalidate();
           },
           handleInput(data: string) {
+            if (Date.now() - openedAt < 200 && isEnter(data)) return;
             picker.handleInput(data);
             tui.requestRender();
           },
         } as Component & { focused: boolean };
       },
-      { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", anchor: "top-left", margin: 0 } },
+      { overlay: true, overlayOptions: { width: "92%", maxHeight: "92%", anchor: "center" } },
     );
 
     if (!result || result.kind === "cancel") return;
@@ -687,7 +713,7 @@ export default function (pi: ExtensionAPI) {
             }
             // ② Enter 提交 /model
             if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
-              const t = ed.getText().trim();
+              const t = normalizeCommand(ed.getText());
               if (t === "/model" || t.startsWith("/model ")) {
                 ed.setText("");
                 void open(ctx, false);
