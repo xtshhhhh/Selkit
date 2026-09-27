@@ -1,5 +1,166 @@
 # Changelog
 
+## 1.5.0
+
+### 新增：鼠标操控窗口
+
+窗口改成鼠标驱动，键盘照样能用。
+
+```
+╔═ MODEL PICKER ══════════════════ SYS ▸ ONLINE NODE 1/3 ╤══╗
+║▐ Claude ▌ ▕ Codex ▏ ▕ 鸡蛋 ▏                              ║   ← 分组按钮条
+║════════════════════════════════════════════════════════════║
+║─ ccs-codex Codex 面 (10)───────────────────────────────────║
+║▐◉  1  deepseek-v4-flash                    600K ◈◆        ▌║   ← 单击选中
+║│   2  deepseek-v4-flash-0731               600K ◈◆        │║      双击确认
+║│   3  deepseek-v4-pro                      600K ◈◆        │║
+║└──────────────────────────────────────────────────────────┘║
+║[1/10] ▓▓▓░░░░░░░░░░░░░░░░░  FILTER OFF                     ║
+║ 思考  low │ medium │ high                                  ║   ← 点击设思考强度
+╚═▓▒░ cyberspace model selector ░▒▓══════════════════════════╝
+```
+
+| 操作 | 行为 |
+|---|---|
+| 单击模型 | 选中（移动光标），窗口不关 |
+| **双击**模型 | 确认选择 |
+| `d` / `D` | 设为默认（写 `settings.json`）|
+| 单击分组标签 | 切换分组 |
+| 单击思考强度 | 设置 low / medium / high |
+| 滚轮 | 上下移动光标，越界自动翻页 |
+| 数字键 `1-9 0` | 定位到第 N 项 |
+| `Enter` | 确认选择 |
+| `Esc` | 关闭 |
+
+### 思考强度会持久化
+
+点一下就写进 `settings.json` 的 `defaultThinkingLevel`，下次启动生效。
+
+### 分组按钮可自定义
+
+分组来自两个地方：
+
+1. **CC Switch** 的两个面（`cc-switch` Claude / `ccs-codex` Codex），自动
+2. **额外分组**：`~/.pi/agent/ccswitch-extra.json`
+
+```json
+{
+  "groups": [
+    {
+      "id": "ccs-egg",
+      "label": "鸡蛋",
+      "name": "鸡蛋 · DeepSeek",
+      "baseUrl": "https://your-relay.example.com/v1",
+      "apiKey": "sk-...",
+      "api": "openai-responses",
+      "contextWindow": 600000,
+      "maxTokens": 128000,
+      "enabled": true
+    }
+  ]
+}
+```
+
+标签条上的文字取 `label`（内置两个面显示 `Claude` / `Codex`，
+其余显示配置里的 `label`，没写就显示 provider id）。
+
+### 实现要点（踩坑记录）
+
+#### ① pi 默认不报鼠标**按键**事件
+
+pi 进 TUI 时只开了 `?1003h`（任意移动）+ `?1006h`（SGR 格式），
+**没开 `?1000h`（按钮事件）**。所以滚轮能收到、点击收不到。
+开窗时自己补上，关窗时还原：
+
+```ts
+const MOUSE_ON = "\u001b[?1000h\u001b[?1002h\u001b[?1006h";
+const MOUSE_OFF = "\u001b[?1000l\u001b[?1002l";
+process.stdout.write(MOUSE_ON);
+// …ctx.ui.custom(...)
+process.stdout.write(MOUSE_OFF);
+```
+
+#### ② 鼠标事件走 `handleMouse`，不走 `handleInput`
+
+pi 的 `handleViewportInput` 会把 SGR 序列**全部消费掉**，
+然后 `dispatchMouseToOverlay` → `component.handleMouse(event)`。
+所以必须给 `ctx.ui.custom` 返回的组件加 `handleMouse`，
+只在 `handleInput` 里解析 SGR 是收不到的。
+
+#### ③ 返回值必须带 `handled: true`
+
+pi 的 `dispatchMouseEvent` 有这么一段：
+
+```js
+let result = component.handleMouse?.(event);
+if (result) {
+  if ("target" in result) return result;
+  if (!(!result.handled && !result.capture && !result.focus))
+    return { ...result, handled: true, …, target: {...} };
+}
+// 否则整个结果被丢弃
+```
+
+返回 `{render: true}` 会被静默丢掉 → pi 不记 `mousePressTarget`
+→ release 时走不到 `getComponentClickCount` → **`clickCount` 永远是 1，双击永远不成立**。
+
+```ts
+handleMouse(event: any) {
+  const redraw = picker.handleMouseEvent(event);
+  if (redraw) tui.requestRender();
+  return { handled: true, render: redraw };
+}
+```
+
+#### ④ 坐标就是 `render()` 的行号
+
+pi 传的 `event.y` 相对 overlay 左上角，就是 `render()` 输出的下标。
+不用自己再加偏移 —— 但 `render()` 拼装时最外层会先插一行标题，
+所以记录命中区域时要 `+1`。
+
+#### ⑤ `status` 行会让下面的行号漂移
+
+原来 `status` 排在进度条和思考条之间，一出现就把思考条推下一行，
+记录的命中区域就和实际位置错开 1 行。把 `status` 移到最底部。
+
+#### ⑥ 标签的命中区间要算上装饰符
+
+`▐ text ▌` 里的 `▐`/`▌` 各占 1 列，只按文字算会出现点边缘落空：
+
+```ts
+const from = x;
+x += 1 + visibleWidth(text) + 1;   // 含两侧装饰符
+const to = x;
+```
+
+### 验证
+
+**单测 27/27**：
+
+- 渲染宽度 12–150 列逐行精确相等
+- 思考条 y 不随 `status` 出现/消失而漂移（三个分组下都是 16）
+- 点思考条三项 → `low` / `medium` / `high` 都正确
+- 点模型第 1–10 行 → 光标分别落在 0–9
+- 第 1 行：单击不关窗、`clickCount:2` 关窗且 `kind=select`
+- 键盘 `PgDn` / `d` 仍然可用
+
+**真机（node-pty，140 列）**：
+
+| 操作 | 结果 |
+|---|---|
+| Ctrl+L 开窗 | ✓ `NODE 1/3` |
+| 点「鸡蛋」标签 | ✓ `NODE 3/3`，`▐ 鸡蛋 ▌` 高亮，列表 `ccs-egg 鸡蛋 (2)` |
+| 单击模型 | ✓ 状态行 `// PICK >> deepseek-v4.1-flash-expires-on-0910` |
+| 双击模型 | ✓ 提示条「已切换模型」 |
+| 点 `low` | ✓ 状态行 `THINK >> low`，`settings.json` 写入 `defaultThinkingLevel: "low"` |
+| 滚轮 | ✓ `{"type":"wheel","wheelDelta":-3}` |
+
+启动耗时 1174 / 1112 / 1188 ms（没变慢）。
+
+### 顺带
+
+- 面板右侧 `COMMAND DECK` 换成鼠标版说明
+- 思考强度初始值从 `settings.json` 的 `defaultThinkingLevel` 读取
 ## 1.4.0
 
 ### 新增：额外分组（CC Switch 之外的中转站）

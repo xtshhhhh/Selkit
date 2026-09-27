@@ -39,6 +39,56 @@ import { type Component, Input, Key, matchesKey, truncateToWidth, visibleWidth }
 /** 每组每页最多显示多少个。 */
 const PAGE_SIZE = 10;
 
+// ── 鼠标（SGR 1006 扩展模式）──────────────────────────────
+//
+// 实测：pi 把鼠标序列原样送进组件的 handleInput，但从不调用
+// handleMouse。所以这里自己解析。
+//
+//   ESC [ < btn ; col ; row M    按下
+//   ESC [ < btn ; col ; row m    抬起
+//
+// col/row 是 1-based。btn 位含义：
+//   0=左键 1=中键 2=右键 32=左键拖动 64=滚轮上 65=滚轮下
+
+// pi-tui 进 TUI 时只开了 ?1003h（任意移动）和 ?1006h（SGR 格式），
+// 没开 ?1000h（按钮事件）—— 所以只报移动、不报点击。
+// 打开窗口时自己补上，关窗时还原，免得影响 pi 自身的输入处理。
+const MOUSE_ON = "\u001b[?1000h\u001b[?1002h\u001b[?1006h";
+const MOUSE_OFF = "\u001b[?1000l\u001b[?1002l";
+
+const MOUSE_RE = /^\u001b\[<(\d+);(\d+);(\d+)([Mm])$/;
+
+interface MouseHit {
+  type: "press" | "release" | "wheel";
+  button: number;
+  x: number; // 0-based
+  y: number; // 0-based
+  wheel: number; // -1 上 1 下 0 无
+}
+
+function parseMouse(data: string): MouseHit | undefined {
+  const m = MOUSE_RE.exec(data);
+  if (!m) return undefined;
+  const btn = Number(m[1]);
+  const x = Number(m[2]) - 1;
+  const y = Number(m[3]) - 1;
+  const up = m[4] === "m";
+  const wheelBit = btn & 64;
+  if (wheelBit) {
+    return { type: "wheel", button: btn & 3, x, y, wheel: (btn & 1) === 0 ? -1 : 1 };
+  }
+  // 32=拖动，44=拖动抬起等，统一当 motion 忽略
+  if ((btn & 32) !== 0 && !up) return undefined;
+  return { type: up ? "release" : "press", button: btn & 3, x, y, wheel: 0 };
+}
+
+// ── 思考强度 ──────────────────────────────────────────────
+const THINK_LEVELS = ["low", "medium", "high"] as const;
+type ThinkLevel = (typeof THINK_LEVELS)[number];
+
+/** 双击判定窗口（毫秒）。 */
+const DOUBLE_CLICK_MS = 420;
+
 /** 右侧指令面板宽度（列）。 */
 const DECK_WIDTH = 25;
 
@@ -134,6 +184,21 @@ function saveDefaultModel(provider: string, modelId: string): boolean {
   s.defaultProvider = provider;
   s.defaultModel = modelId;
   return writeSettings(s);
+}
+
+/** 把思考强度写进 settings.json 的 defaultThinkingLevel。 */
+function saveThinkingLevel(level: string): boolean {
+  const s = readSettings();
+  if (!s) return false;
+  s.defaultThinkingLevel = level;
+  return writeSettings(s);
+}
+
+/** 读当前思考强度（settings.json 里没有就返回 undefined）。 */
+function readThinkingLevel(): string | undefined {
+  const s = readSettings();
+  const v = s?.defaultThinkingLevel;
+  return typeof v === "string" ? v : undefined;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -240,8 +305,8 @@ const ok = (s: string) => T.fg("success", s);
 // ─────────────────────────────────────────────────────────────
 
 type PickerResult =
-  | { kind: "select"; model: Model<Api> }
-  | { kind: "default"; model: Model<Api> }
+  | { kind: "select"; model: Model<Api>; think: string }
+  | { kind: "default"; model: Model<Api>; think: string }
   | { kind: "cancel" };
 
 type PickerOptions = {
@@ -250,6 +315,8 @@ type PickerOptions = {
   onDone: (r: PickerResult) => void;
   onRefresh: () => Promise<Model<Api>[]>;
   getCurrent: () => Model<Api> | undefined;
+  /** 用于鼠标操作后请求重绘。 */
+  tui?: any;
 };
 
 /** 显示宽度感知的补齐/截断。 */
@@ -277,6 +344,30 @@ class ModelPicker implements Component {
   private busy = false;
   private _focused = true;
 
+  // ── 鼠标：渲染时记录命中区域，点击时反查 ──
+  /** 分组按钮条上每个按钮的 x 区间（该行是 y=1，即 0-based row 1）。 */
+  private tabHits: { i: number; from: number; to: number }[] = [];
+  /** 模型列表每行对应的「页内序号」（0-based）；-1 表示该行不是模型行。 */
+  private rowHits: number[] = [];
+  /** 思考强度按钮的 x 区间。 */
+  private thinkHits: { i: number; from: number; to: number }[] = [];
+  /** 渲染时记录的布局信息，供鼠标反查。 */
+  private layout = { tabRow: 1, listTop: 3, thinkRow: 0, width: 0 };
+  /** 模型列表第一行在 L 中的下标（不含外层标题行）。 */
+  private listTopRow = 0;
+
+  /** 上次点击（判定双击）。 */
+  private lastClick = { at: 0, key: "" };
+
+  /** 当前思考强度。 */
+  private think: ThinkLevel = "high";
+
+  /** 用 settings.json 里的 defaultThinkingLevel 覆盖初始值。 */
+  private loadThink(): void {
+    const v = readThinkingLevel();
+    if (v && (THINK_LEVELS as readonly string[]).includes(v)) this.think = v as ThinkLevel;
+  }
+
   constructor(opts: PickerOptions) {
     this.opts = opts;
     this.filterInput = new Input({ prompt: "▸ ", placeholder: "type to filter…" });
@@ -285,6 +376,7 @@ class ModelPicker implements Component {
     this.filterInput.onSubmit = () => this.selectCursor();
     this.groups = this.rebuild();
     this.clamp();
+    this.loadThink();
   }
 
   get focused(): boolean {
@@ -342,7 +434,7 @@ class ModelPicker implements Component {
 
   private finish(model: Model<Api>, forceDefault = false): void {
     const asDefault = forceDefault || this.opts.enterSetsDefault;
-    this.opts.onDone(asDefault ? { kind: "default", model } : { kind: "select", model });
+    this.opts.onDone({ kind: asDefault ? "default" : "select", model, think: this.think });
   }
 
   private selectCursor(): void {
@@ -400,7 +492,220 @@ class ModelPicker implements Component {
     this.status = "";
   }
 
-  handleInput(data: string): void {
+  // ─────────────────────────────────────────────────────────
+  //  思考强度
+  // ─────────────────────────────────────────────────────────
+
+  private setThink(i: number): void {
+    const lv = THINK_LEVELS[Math.max(0, Math.min(THINK_LEVELS.length - 1, i))];
+    if (!lv) return;
+    this.think = lv;
+    this.status = `// THINK >> ${lv}`;
+  }
+
+  private moveThink(delta: number): void {
+    const i = THINK_LEVELS.indexOf(this.think);
+    this.setThink((i + delta + THINK_LEVELS.length) % THINK_LEVELS.length);
+  }
+
+  // ─────────────────────────────────────────────────────────
+  //  鼠标
+  // ─────────────────────────────────────────────────────────
+  //
+  // pi 不转发 handleMouse，所以这里解析 SGR 序列，再用渲染时
+  // 记录的命中区域反查点到了什么。
+
+  private hitTab(y: number, x: number): number | undefined {
+    for (const h of this.tabHits) if (x >= h.from && x < h.to) return h.i;
+    return undefined;
+  }
+
+  private hitThink(y: number, x: number): number | undefined {
+    for (const h of this.thinkHits) if (x >= h.from && x < h.to) return h.i;
+    return undefined;
+  }
+
+  /** 模型列表里第 y 行对应哪个模型（返回组内绝对下标）。 */
+  private hitModel(y: number): number | undefined {
+    const rel = y - this.layout.listTop;
+    if (rel < 0 || rel >= this.rowHits.length) return undefined;
+    const local = this.rowHits[rel];
+    if (local === undefined || local < 0) return undefined;
+    return this.pageIndex * PAGE_SIZE + local;
+  }
+
+  /**
+   * pi 的 overlay 鼠标分发入口。
+   *
+   * pi 的 event 形如：
+   *   { type: "press"|"release"|"click"|"wheel"|"move"|"drag",
+   *     button: "left"|"middle"|"right"|"none",
+   *     x, y, width, height, wheelDelta?, clickCount? }
+   * 坐标已相对本 overlay。返回 true 表示需要重绘。
+   */
+  /**
+   * pi 的 overlay 鼠标分发入口。
+   *
+   * pi 的事件形如：
+   *   { type: "press"|"release"|"click"|"wheel"|"move"|"drag",
+   *     button: "left"|"middle"|"right"|"none",
+   *     x, y, width, height, wheelDelta?, clickCount? }
+   * 坐标已相对本 overlay。返回 true 表示需要重绘。
+   *
+   * 关键：**只认 pi 的 click，不自己判双击**。
+   * pi 对一次单击会依次发 press → release → click，自己再判一次双击
+   * 会把 press 和 click 当成两次点击，反而永远判不出真正的双击。
+   * pi 在 click 里已经带了 clickCount，直接用。
+   */
+  handleMouseEvent(event: any): boolean {
+    if (!event) return false;
+    const x = Number(event.x ?? 0);
+    const y = Number(event.y ?? 0);
+
+    // ── 滚轮 ──
+    if (event.type === "wheel" || event.wheelDelta !== undefined) {
+      const d = (event.wheelDelta ?? 0) < 0 ? -1 : 1;
+      this.onMouse({ type: "wheel", button: 0, x, y, wheel: d }, this.opts.tui);
+      return true;
+    }
+
+    // press / release 必须「认领」这次手势，两个原因：
+    //
+    // 1. pi 只有在组件对 press 返回真值时，才会记下 mousePressTarget
+    //    （见 handleMouseEvent：type==="press" && (…mousePressTarget=result.target)）
+    // 2. 之后 release 才会走 getComponentClickCount 去累加 clickCount
+    //
+    // 我们若对 press 返回假值，pi 就把点击交给文本选择逻辑，
+    // 每次都是全新一轮 —— clickCount 永远是 1，双击永远不成立。
+    if (event.type === "press") {
+      const i = this.hitModel(y);
+      // 只认领列表里的（以及标签条/思考条上的）点击，别抢别处的
+      const mine = y === this.layout.tabRow || y === this.layout.thinkRow || i !== undefined;
+      return mine;
+    }
+    if (event.type === "release") return false;
+    if (event.type !== "click") return false;
+    if (event.button !== "left" && event.button !== undefined) return false;
+
+    return this.clickAt(x, y, (event.clickCount ?? 1) >= 2);
+  }
+
+  /** 处理一次点击；(x,y) 是 overlay 内 0-based 坐标。 */
+  private clickAt(x: number, y: number, doubleClick: boolean): boolean {
+    // ── 分组按钮条 ──
+    if (y === this.layout.tabRow) {
+      const i = this.hitTab(y, x);
+      if (i === undefined || i === this.groupIndex) return false;
+      this.groupIndex = i;
+      this.pageIndex = 0;
+      this.cursor = 0;
+      this.status = "";
+      return true;
+    }
+
+    // ── 思考强度 ──
+    if (y === this.layout.thinkRow) {
+      const i = this.hitThink(y, x);
+      if (i === undefined) return false;
+      this.setThink(i);
+      return true;
+    }
+
+    // ── 模型列表 ──
+    const idx = this.hitModel(y);
+    if (idx === undefined) return false;
+    const g = this.groups[this.groupIndex];
+    const model = g?.models[idx];
+    if (!model) return false;
+
+    this.cursor = idx - this.pageIndex * PAGE_SIZE;
+
+    if (doubleClick) {
+      this.finish(model); // 双击 = 确认选择
+      return true;
+    }
+
+    this.status = `// PICK >> ${model.id}  （双击确认 · d 设默认）`;
+    return true;
+  }
+  private onMouse(ev: MouseHit, tui: any): void {
+    const { x, y } = ev;
+
+    // ── 滚轮：上下移动光标，到头就翻页 ──
+    if (ev.type === "wheel") {
+      const g = this.groups[this.groupIndex];
+      if (!g) return;
+      const n = g.models.length;
+      const next = this.cursor + ev.wheel;
+      if (next < 0 || next >= n) {
+        this.movePage(ev.wheel);
+      } else {
+        this.cursor = next;
+        // 滚出当前页就自动翻页
+        const page = Math.floor(this.cursor / PAGE_SIZE);
+        if (page !== this.pageIndex) this.pageIndex = page;
+      }
+      tui.requestRender();
+      return;
+    }
+
+    if (ev.type !== "press" || ev.button !== 0) return;
+
+    // ── 分组按钮条 ──
+    if (y === this.layout.tabRow) {
+      const i = this.hitTab(y, x);
+      if (i !== undefined && i !== this.groupIndex) {
+        this.groupIndex = i;
+        this.pageIndex = 0;
+        this.cursor = 0;
+        this.status = "";
+        tui.requestRender();
+      }
+      return;
+    }
+
+    // ── 思考强度按钮 ──
+    if (y === this.layout.thinkRow) {
+      const i = this.hitThink(y, x);
+      if (i !== undefined) {
+        this.setThink(i);
+        tui.requestRender();
+      }
+      return;
+    }
+
+    // ── 模型列表 ──
+    const idx = this.hitModel(y);
+    if (idx === undefined) return;
+    const g = this.groups[this.groupIndex];
+    const model = g?.models[idx];
+    if (!model) return;
+
+    // 双击判定
+    const now = Date.now();
+    const key = model.provider + "/" + model.id;
+    const isDouble = this.lastClick.key === key && now - this.lastClick.at < DOUBLE_CLICK_MS;
+    this.lastClick = { at: now, key };
+
+    this.cursor = idx - this.pageIndex * PAGE_SIZE;
+    if (isDouble) {
+      this.lastClick = { at: 0, key: "" };
+      this.finish(model); // 双击 = 确认选择
+      return;
+    }
+    this.status = `// PICK >> ${model.id}  （双击确认 · d 设默认）`;
+    tui.requestRender();
+  }
+
+  handleInput(data: string, tui?: any): void {
+    // 鼠标序列优先处理（pi 不会走 handleMouse）
+    
+    const mouse = parseMouse(data);
+    if (mouse) {
+      this.onMouse(mouse, tui ?? this.opts.tui);
+      return;
+    }
+
     const filtering = this.filterInput.getValue() !== "";
 
     // ── 两种模式都生效 ──
@@ -473,86 +778,164 @@ class ModelPicker implements Component {
   render(width: number): string[] {
     const hasDeck = width >= DECK_MIN_TERM_WIDTH;
     const deckW = hasDeck ? DECK_WIDTH : 0;
-    // 布局: ╔ + 左栏(leftW) + [│ + deckW] + ╗  =  totalW
-    const totalW = Math.max(12, width);
-    const leftW = hasDeck ? totalW - 2 - deckW - 1 : Math.max(4, totalW - 2);
+    const totalW = Math.max(2, width);
+    const leftW = hasDeck ? totalW - 2 - deckW - 1 : Math.max(2, totalW - 2);
 
+    const cur = this.opts.getCurrent();
+    const inner = leftW; // 左栏可用宽度（不含外框竖线）
+
+    // ── 命中区域重置（每次渲染重建）──
+    this.tabHits = [];
+    this.rowHits = [];
+    this.thinkHits = [];
+    this.layout.width = totalW;
+    
+
+    const L: string[] = [];
+    const push = (line: string) => {
+      L.push(fit(line, inner));
+      return L.length - 1; // 返回该行在 L 里的下标
+    };
+
+    // ══════════════════════════════════════════════════════
+    //  分组按钮条（第 1 行，可点击）
+    // ══════════════════════════════════════════════════════
+    //
+    // 用 L 的下标记录 y；最外层还会加一行标题，所以真实 y 要 +1。
+    {
+      const parts: string[] = [];
+      let x = 0;
+      const tabs: { i: number; from: number; to: number }[] = [];
+      for (let i = 0; i < this.groups.length; i++) {
+        const g = this.groups[i]!;
+        const label = g.provider === "cc-switch" ? "Claude" : g.provider === "ccs-codex" ? "Codex" : (g.label || g.provider);
+        const on = i === this.groupIndex;
+        const text = " " + label + " ";
+        // 装饰符不占「逻辑宽度」但占「屏幕宽度」：
+        //   ▐ / ▌ 各 1 列，▕ / ▏ 各 1 列
+        // 命中区间要把它们算进去，否则点标签边缘会落空。
+        const before = parts.length ? " " : "";
+        x += visibleWidth(before);
+        parts.push(before);
+        const from = x;
+        x += 1 + visibleWidth(text) + 1;
+        const to = x;
+        parts.push(on ? neon("▐") + accent(T.bold(text)) + neon("▌") : dim("▕") + cyan(text) + dim("▏"));
+        tabs.push({ i, from, to });
+      }
+      if (!this.groups.length) parts.push(dim("  // NO GROUPS"));
+      const pad = Math.max(0, inner - x);
+      const row = parts.join("") + " ".repeat(pad);
+      const y = push(row);
+      for (const t of tabs) this.tabHits.push({ i: t.i, from: t.from, to: t.to });
+      this.layout.tabRow = y + 1; // +1：拼装时最外层会先插一行标题
+    }
+
+    // ── 分隔线 ──
+    push(neon("═".repeat(Math.max(0, inner))));
+
+    // ══════════════════════════════════════════════════════
+    //  模型列表
+    // ══════════════════════════════════════════════════════
     const g = this.groups[this.groupIndex];
     const pc = this.pageCount();
-    const cur = this.opts.getCurrent();
-
-    // ── 左栏（不含外框）──
-    const L: string[] = [];
-    {
-      const title = " MODEL PICKER ";
-      const sys = "SYS ▸ ONLINE ";
-      const node = `NODE ${this.groupIndex + 1}/${Math.max(1, this.groups.length)} `;
-      const head = "═";
-      const used = visibleWidth(head) + visibleWidth(title) + visibleWidth(sys) + visibleWidth(node);
-      if (leftW - used >= 4) {
-        L.push(neon(head) + accent(T.bold(title)) + neon(fill("═", leftW - used)) + cyan(sys) + neon(node));
-      } else {
-        const t = truncateToWidth(title, Math.max(4, leftW - 3));
-        L.push(neon(head) + accent(T.bold(t)) + neon(fill("═", leftW - 1 - visibleWidth(t))));
-      }
-    }
-    L.push(dim(fill("─", leftW)));
 
     if (!g) {
-      L.push(dim("  // NO MATCH  没有匹配的模型"));
-      L.push(dim("  // Esc 清空过滤 / 关闭"));
+      push(dim("  // NO MATCH  没有匹配的模型"));
+      push(dim("  // Esc 清空过滤 / 关闭"));
     } else {
-      const lab = g.label ? ` ${g.label}` : "";
-      const headPlain = "┌─[ " + g.provider + " ]" + lab + ` (${g.models.length})`;
-      L.push(
-        neon("┌─[") + " " + accent(g.provider) + " " + neon("]") + cyan(lab) +
-          dim(` (${g.models.length})`) +
-          dim(fill("─", Math.max(0, leftW - visibleWidth(headPlain) - 1))) + neon("┐"),
-      );
+      const head = ` ${g.provider} ` + (g.label ? `${g.label} ` : "") + `(${g.models.length})`;
+      push(dim("─") + accent(T.bold(head)) + dim("─".repeat(Math.max(0, inner - visibleWidth(head) - 1))));
+      this.listTopRow = L.length; // 下一行就是第一个模型
 
-      const rightW = 12;
-      const nameW = Math.max(8, leftW - 4 - rightW);
-      for (const { model, num, localIndex } of this.pageModels()) {
+      const rightW = 13;
+      const nameW = Math.max(8, inner - 4 - rightW);
+      const rows = this.pageModels();
+
+      for (const { model, num, localIndex } of rows) {
         const isCursor = localIndex === this.cursor;
-        const isCur = cur && cur.provider === model.provider && cur.id === model.id;
+        const isCur = !!cur && cur.provider === model.provider && cur.id === model.id;
         const keyLabel = num === 10 ? "0" : String(num);
         const marker = isCur ? G.active : isCursor ? G.cursor : G.blank;
         const tags = (model.reasoning ? G.think : " ") + (model.input?.includes("image") ? G.image : " ");
         const right = fmtContext(model.contextWindow) + " " + tags;
         const raw = `${marker} ${keyLabel.padStart(2)}  ${model.id}`;
         const shown = truncateToWidth(raw, nameW);
-        const painted = isCur ? ok(shown) : isCursor ? accent(shown) : cyan(shown);
-        const inner = painted + " ".repeat(Math.max(1, nameW - visibleWidth(shown))) + dim(fit(right, rightW));
-        L.push((isCursor ? neon("▐") : dim("│")) + fit(inner, leftW - 2) + (isCursor ? neon("▌") : dim("│")));
+        const painted = isCur ? ok(shown) : isCursor ? accent(T.bold(shown)) : cyan(shown);
+        const body = painted + " ".repeat(Math.max(1, nameW - visibleWidth(shown))) + dim(fit(right, rightW));
+        push((isCursor ? neon("▐") : dim("│")) + fit(body, inner - 2) + (isCursor ? neon("▌") : dim("│")));
+        this.rowHits.push(localIndex);
       }
-      L.push(neon("└") + dim(fill("─", leftW - 2)) + neon("┘"));
+
+      // 补空行，让列表高度稳定（翻页时光标不跳）
+      for (let i = rows.length; i < PAGE_SIZE; i++) {
+        push(dim("│") + " ".repeat(Math.max(0, inner - 2)) + dim("│"));
+        this.rowHits.push(-1);
+      }
+
+      push(neon("└") + dim("─".repeat(Math.max(0, inner - 2))) + neon("┘"));
     }
 
-    L.push(dim(fill("─", leftW)));
+    // 列表第一行的 y = 它在 render() 输出里的下标。
+    // 注意：pi 给 handleMouse 的 event.y 就是 render() 输出的行号，
+    // 不需要再补偿任何偏移。
+    this.layout.listTop = this.listTopRow + 1; // +1：同上
 
+    // ── 进度条 ──
     if (g) {
       const startIdx = this.pageIndex * PAGE_SIZE;
       const pos = Math.min(g.models.length, Math.max(1, this.cursor - startIdx + 1));
-      const barW = Math.max(6, leftW - 34);
+      const barW = Math.max(6, inner - 34);
       const filledW = Math.max(0, Math.round((pos / Math.max(1, g.models.length)) * barW));
       const bar = neon(fill(G.block, filledW)) + dim(fill(G.light, barW - filledW));
-      L.push(dim(`[${pos}/${g.models.length}] `) + bar + dim(`  FILTER ${this.filterInput.getValue() ? "ON" : "OFF"}`));
+      push(dim(`[${pos}/${g.models.length}] `) + bar + dim(`  FILTER ${this.filterInput.getValue() ? "ON " : "OFF"}`));
     }
 
-    if (this.status) L.push(warn(" " + this.status));
+    // ══════════════════════════════════════════════════════
+    //  思考强度（底部，可点击）
+    // ══════════════════════════════════════════════════════
+    //
+    // 注意：这一行必须落在固定的 y 上，所以放在 status 之前。
+    // 否则每次 status 出现/消失，思考条的 y 就会漂 1 行，
+    // 渲染时记录的命中区域和用户实际点的位置对不上。
+    {
+      const label = " 思考 ";
+      const parts: string[] = [dim(label)];
+      let x = visibleWidth(label);
+      for (let i = 0; i < THINK_LEVELS.length; i++) {
+        const lv = THINK_LEVELS[i]!;
+        const on = this.think === lv;
+        const text = " " + lv + " ";
+        const from = x;
+        x += visibleWidth(text);
+        parts.push(on ? ok(T.bold(text)) : dim(text));
+        this.thinkHits.push({ i, from, to: x });
+        if (i < THINK_LEVELS.length - 1) { parts.push(dim("│")); x += 1; }
+      }
+      const pad = Math.max(0, inner - x);
+      const y = push(parts.join("") + " ".repeat(pad));
+      this.layout.thinkRow = y + 1; // +1：同上
+    }
 
-    // ── 右栏（不含外框）──
+    // status 放最后，它变长变短都不影响上面各行的 y
+    if (this.status) push(warn(" " + this.status));
+
+    // ══════════════════════════════════════════════════════
+    //  右栏 COMMAND DECK
+    // ══════════════════════════════════════════════════════
     const R: string[] = [];
     if (hasDeck) {
-      R.push(accent("═ COMMAND DECK "));
       const row = (k: string, v: string) => cyan(" " + k) + dim("  " + v);
+      R.push(accent("═ COMMAND DECK "));
       for (const [k, v] of [
-        ["1-9 0", "定位到第 N 项"],
-        ["PgUp/Dn", "切换分组"],
+        ["鼠标", "单击选中"],
+        ["双击", "确认选择"],
+        ["滚轮", "上下移动"],
+        ["点标签", "切换分组"],
+        ["点思考", "设置强度"],
         ["←  →", "切换分组"],
         ["↑  ↓", "移动光标"],
-        ["j  k", "移动光标"],
-        ["<  >", "组内翻页"],
+        ["1-9 0", "定位第 N 项"],
         ["Enter", "确认选择"],
         ["d  D", "设为默认"],
         ["r  R", "重新同步"],
@@ -569,34 +952,47 @@ class ModelPicker implements Component {
       R.push(row("页码", pc > 1 ? `${this.pageIndex + 1}/${pc}` : "—"));
     }
 
-    // ── 拼装 ──
-    const head = L.shift() ?? "";
-    L.pop(); // 丢弃左栏最后的分隔线（底栏另画）
-    if (L.length > 0 && L[L.length - 1] === undefined) L.pop();
+    // ══════════════════════════════════════════════════════
+    //  拼装外框
+    // ══════════════════════════════════════════════════════
+    // 内容行 = ║ + leftW + │ + deckW + ║
+    // 顶行   = ╔ + title/fill(leftW) + ╤ + deckW + ╗
+    const used = visibleWidth(" MODEL PICKER ") + visibleWidth("SYS ▸ ONLINE ") +
+      visibleWidth(`NODE ${this.groupIndex + 1}/${Math.max(1, this.groups.length)} `);
+    let top: string;
+    if (leftW - used - 1 >= 4) {
+      top = neon("═") + accent(T.bold(" MODEL PICKER ")) +
+        neon(fill("═", leftW - used - 1)) + cyan("SYS ▸ ONLINE ") +
+        neon(`NODE ${this.groupIndex + 1}/${Math.max(1, this.groups.length)} `);
+    } else {
+      const t = truncateToWidth(" MODEL PICKER ", Math.max(4, leftW - 3));
+      top = neon("═") + accent(T.bold(t)) + neon(fill("═", leftW - 1 - visibleWidth(t)));
+    }
 
-    const rows = Math.max(L.length, R.length);
-    const out: string[] = [neon("╔") + fit(head, leftW) + (hasDeck ? neon("╤") + dim(fill("═", deckW)) : "") + neon("╗")];
-
-    for (let i = 0; i < rows; i++) {
+    const rowsN = Math.max(L.length, R.length);
+    const out: string[] = [
+      neon("╔") + fit(top, leftW) + (hasDeck ? neon("╤") + dim(fill("═", deckW)) : "") + neon("╗"),
+    ];
+    for (let i = 0; i < rowsN; i++) {
       out.push(
         neon("║") + fit(L[i] ?? "", leftW) + (hasDeck ? neon("│") + fit(R[i] ?? "", deckW) : "") + neon("║"),
       );
     }
 
-    // 底部边框宽度必须与内容行完全相等，否则终端重绘会错位。
-    // 内容行 = ║ + leftW + │ + deckW + ║      = leftW + deckW + 3
-    // 底部行 = ╚═ + foot + fill + ╧ + deckW + ╝ = foot + fill + deckW + 4
-    // 令两者相等 → fill = leftW - foot - 1
+    // 底行宽度必须与内容行完全相等，否则终端重绘错位。
+    // 内容行 = ║ + leftW + │ + deckW + ║ = leftW + deckW + 3
+    // 底行   = ╚═ + foot + fill + ╧ + deckW + ╝ = foot + fill + deckW + 4
+    // 令相等 → fill = leftW - foot - 1
     const foot = "▓▒░ cyberspace model selector ░▒▓";
     const footShown = truncateToWidth(foot, Math.max(4, leftW - 2));
     out.push(
-      neon("╚═") + dim(footShown) + neon(fill("═", Math.max(0, leftW - 1 - visibleWidth(footShown)))) +
+      neon("╚═") + dim(footShown) +
+        neon(fill("═", Math.max(0, leftW - 1 - visibleWidth(footShown)))) +
         (hasDeck ? neon("╧") + dim(fill("═", deckW)) : "") + neon("╝"),
     );
 
     return out;
   }
-
   snapshot() {
     return {
       groups: this.groups,
@@ -662,6 +1058,16 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
+    // 补开按钮事件追踪（pi 只开了移动追踪）。
+    // 忘了关的话，pi 自己的鼠标处理会收到多余的 press/release。
+    let mouseOn = false;
+    try {
+      process.stdout.write(MOUSE_ON);
+      mouseOn = true;
+    } catch {
+      /* 写不了就算了，键盘仍可用 */
+    }
+
     const result = await ctx.ui.custom<PickerResult>(
       (tui, theme, _kb, done) => {
         T = theme as unknown as ThemeLike;
@@ -670,6 +1076,7 @@ export default function (pi: ExtensionAPI) {
           enterSetsDefault,
           getCurrent: () => ctx.model as Model<Api> | undefined,
           onDone: (r) => done(r),
+          tui, // 鼠标操作后请求重绘用
           onRefresh: async () => {
             await ctx.modelRegistry.refresh();
             return ctx.modelRegistry.getAvailable();
@@ -693,13 +1100,35 @@ export default function (pi: ExtensionAPI) {
           },
           handleInput(data: string) {
             if (Date.now() - openedAt < 200 && isEnter(data)) return;
-            picker.handleInput(data);
+            picker.handleInput(data, tui);
             tui.requestRender();
           },
-        } as Component & { focused: boolean };
+          // ── 鼠标 ──
+          //
+          // pi 会把 SGR 序列全部消费掉，然后走 dispatchMouseToOverlay →
+          // component.handleMouse(event)。所以必须实现在这里，
+          // 光有 handleInput 是收不到的。
+          //
+          // event.x / event.y 已经是相对本 overlay 左上角的 0-based 坐标。
+          // ── 鼠标 ──
+          //
+          // pi 的 dispatchMouseEvent 有个坑：返回对象里必须带
+          // handled / capture / focus 之一，否则整个结果被丢弃，
+          // pi 就不会记下 mousePressTarget，双击计数也永远涨不起来。
+          // 所以这里固定回 handled: true。
+          handleMouse(event: any) {
+            const redraw = picker.handleMouseEvent(event);
+            if (redraw) tui.requestRender();
+            return { handled: true, render: redraw };
+          },
+        } as Component & { focused: boolean; handleMouse?: (e: any) => any };
       },
       { overlay: true, overlayOptions: { width: "92%", maxHeight: "92%", anchor: "center" } },
     );
+
+    if (mouseOn) {
+      try { process.stdout.write(MOUSE_OFF); } catch {}
+    }
 
     if (!result || result.kind === "cancel") return;
     const model = result.model;
@@ -712,6 +1141,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       const wrote = saveDefaultModel(model.provider, model.id);
+      saveThinkingLevel(result.think);
       if (wrote) {
         toast(ctx, "默认模型已设置", `${model.provider}/${model.id}`, "ok");
       } else {
@@ -725,7 +1155,14 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`没有 ${model.provider}/${model.id} 的凭据`, "error");
       return;
     }
-    toast(ctx, "已切换模型", `${model.provider}/${model.id}`, "ok");
+    const thinkChanged = result.think !== readThinkingLevel();
+    if (thinkChanged) saveThinkingLevel(result.think);
+    toast(
+      ctx,
+      "已切换模型",
+      `${model.provider}/${model.id}${thinkChanged ? `  ·  ${result.think}` : ""}`,
+      "ok",
+    );
   }
 
   const handler = async (args: string, ctx: ExtensionContext) => {
