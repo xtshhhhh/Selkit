@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.3.2
+
+### 新增：按 `D` 设默认后弹出提示条
+
+以前按 `D` 只调 `ctx.ui.notify(..., "info")` —— 那只是往对话区追加**一行暗色小字**，
+很容易被忽略。现在改成在**输入框上方**画一条赛博朋克框线提示，3 秒后自动消失：
+
+```
+╭─◆ 默认模型已设置───────────────────────────────────────────────╮
+│ cc-switch/[AN]gemini-3.8-flash-thinking────────────────────────│
+╰────────────────────────────────────────────────────────────────╯
+```
+
+实现用 `ctx.ui.setWidget(key, rows, { placement: "aboveEditor" })`：
+
+```ts
+ctx.ui.setWidget("model-picker-toast", [top, mid, bot], { placement: "aboveEditor" });
+toastTimer = setTimeout(() => {
+  ctx.ui.setWidget("model-picker-toast", undefined);   // 3 秒后消失
+}, 3000);
+```
+
+- 框宽跟着终端列数走（`process.stdout.columns`，钳在 28–66，且每行宽度精确相等）
+- `setWidget` 不可用时回退到 `notify`
+- 普通选择（回车/数字键）也弹提示条："已切换模型"
+
+### 顺带修正：先验证凭据，再写盘
+
+原来顺序是「写 `settings.json` → `pi.setModel()`」，可能出现
+「盘写成功了，但该 provider 没凭据、用不了」。现在调过来了：
+
+```ts
+const set = await pi.setModel(model);      // ① 先验证
+if (!set) { ctx.ui.notify("没有凭据", "error"); return; }
+const wrote = saveDefaultModel(...);       // ② 再写盘
+```
+
+### 验证
+
+- 单测 18/18：命令注册 · Ctrl+L 拦截 · `/model` 放行 · 渲染宽度 12–150 列精确对齐
+- 流程测试：`setModel` 调用 → `setWidget` 3 行宽度 `[60,60,60]` → `settings.json` 写入 → 3 秒后自动清除，全部通过
+- 真机（node-pty 120 列）：`Ctrl+L` 开窗 ✓ 按 `D` 弹出提示条 ✓
+
 ## 1.3.1
 
 ### 窗口恢复到最后那版（赛博朋克）

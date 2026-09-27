@@ -592,6 +592,36 @@ class ModelPicker implements Component {
 // ─────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  // ─────────────────────────────────────────────────────────────
+  //  提示条（输入框上方，几秒后自动消失）
+  // ─────────────────────────────────────────────────────────────
+  //
+  // 不用 ctx.ui.notify("info")：它只往对话区追加一行暗色文字，容易被忽略。
+  // 这里用 setWidget 在输入框上方画一条框线提示。
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function toast(ctx: ExtensionContext, title: string, body: string, kind: "ok" | "warn"): void {
+    const tint = kind === "ok" ? ok : warn;
+    const mark = kind === "ok" ? "◆" : "▲";
+    const w = Math.max(28, Math.min(66, process.stdout.columns ?? 60));
+    const inner = w - 4;
+    const head = mark + " " + title;
+    const padTo = (t: string) => t + " ".repeat(Math.max(0, inner - visibleWidth(t)));
+    const top = neon("╭─") + tint(head) +
+      neon(fill("─", Math.max(0, w - 4 - visibleWidth(head)))) + neon("─╮");
+    const mid = dim("│") + " " + accent(padTo(body)) + " " + dim("│");
+    const bot = neon("╰") + neon(fill("─", w - 2)) + neon("╯");
+    try {
+      ctx.ui.setWidget("model-picker-toast", [top, mid, bot], { placement: "aboveEditor" });
+    } catch {
+      ctx.ui.notify(head + " " + body, kind === "ok" ? "info" : "warning");
+      return;
+    }
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      try { ctx.ui.setWidget("model-picker-toast", undefined); } catch {}
+    }, 3000);
+  }
   async function open(ctx: ExtensionContext, enterSetsDefault: boolean): Promise<void> {
     if (ctx.mode !== "tui") {
       ctx.ui.notify("Model Picker 需要交互模式（TUI）", "warning");
@@ -654,16 +684,18 @@ export default function (pi: ExtensionAPI) {
     const model = result.model;
 
     if (result.kind === "default") {
-      const wrote = saveDefaultModel(model.provider, model.id);
+      // 先验证凭据再写盘，避免「写成功但用不了」
       const set = await pi.setModel(model);
       if (!set) {
         ctx.ui.notify(`没有 ${model.provider}/${model.id} 的凭据`, "error");
         return;
       }
-      ctx.ui.notify(
-        wrote ? `默认模型 → ${model.provider}/${model.id}` : "已切换，但写 settings.json 失败",
-        wrote ? "info" : "warning",
-      );
+      const wrote = saveDefaultModel(model.provider, model.id);
+      if (wrote) {
+        toast(ctx, "默认模型已设置", `${model.provider}/${model.id}`, "ok");
+      } else {
+        toast(ctx, "已切换，但写盘失败", `${model.provider}/${model.id}`, "warn");
+      }
       return;
     }
 
@@ -672,7 +704,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`没有 ${model.provider}/${model.id} 的凭据`, "error");
       return;
     }
-    ctx.ui.notify(`模型 → ${model.provider}/${model.id}`, "info");
+    toast(ctx, "已切换模型", `${model.provider}/${model.id}`, "ok");
   }
 
   const handler = async (args: string, ctx: ExtensionContext) => {
