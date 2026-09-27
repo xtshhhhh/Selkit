@@ -340,18 +340,23 @@ class ModelPicker implements Component {
     if (m) this.finish(m, true);
   }
 
-  /** 按页内序号选（1-10；10 用 0）。 */
+  /**
+   * 按页内序号把光标移过去（1-10；10 用 0）。
+   *
+   * 注意：这里只移动光标，不直接选中 ——
+   * 否则按完数字窗口就关了，根本来不及再按 D 设默认。
+   * 想选中就再按 Enter。
+   */
   private selectByNumber(n: number): void {
     const g = this.groups[this.groupIndex];
     if (!g) return;
     const target = this.pageIndex * PAGE_SIZE + n - 1;
-    const m = g.models[target];
-    if (!m) {
+    if (!g.models[target]) {
       this.status = `// ERR >> 第 ${n} 项不存在`;
       return;
     }
-    this.cursor = target; // 同步光标，紧接着按 D 不会错
-    this.finish(m);
+    this.cursor = target;
+    this.status = `// PICK >> 已定位第 ${n} 项，Enter 选中 / D 设默认`;
   }
 
   private moveGroup(delta: number): void {
@@ -403,17 +408,18 @@ class ModelPicker implements Component {
 
     // ── 仅当过滤框为空时这些才是命令键 ──
     if (!filtering) {
-      if (/^[1-9]$/.test(data)) return this.selectByNumber(Number(data));
+      // 大小写都认：D/d 设默认，J/K 移动，R/r 重同步
+      if (/^([1-9])$/.test(data)) return this.selectByNumber(Number(data));
       if (data === "0") return this.selectByNumber(10);
       if (data === "<") return this.movePage(-1);
       if (data === ">") return this.movePage(1);
-      if (data === "j") return this.moveCursor(1);
-      if (data === "k") return this.moveCursor(-1);
+      if (data === "j" || data === "J") return this.moveCursor(1);
+      if (data === "k" || data === "K") return this.moveCursor(-1);
       if (matchesKey(data, Key.left)) return this.moveGroup(-1);
       if (matchesKey(data, Key.right)) return this.moveGroup(1);
 
-      if (data === "D") return this.setDefaultCursor();
-      if (data === "R") {
+      if (data === "D" || data === "d") return this.setDefaultCursor();
+      if (data === "R" || data === "r") {
         if (this.busy) return;
         this.busy = true;
         this.status = "// RESYNC >> 同步中…";
@@ -526,15 +532,15 @@ class ModelPicker implements Component {
       R.push(accent("═ COMMAND DECK "));
       const row = (k: string, v: string) => cyan(" " + k) + dim("  " + v);
       for (const [k, v] of [
-        ["1-9 0", "选择模型"],
+        ["1-9 0", "定位到第 N 项"],
         ["PgUp/Dn", "切换分组"],
         ["←  →", "切换分组"],
         ["↑  ↓", "移动光标"],
         ["j  k", "移动光标"],
         ["<  >", "组内翻页"],
         ["Enter", "确认选择"],
-        ["D", "设为默认"],
-        ["R", "重新同步"],
+        ["d  D", "设为默认"],
+        ["r  R", "重新同步"],
         ["Esc", "关闭窗口"],
       ] as [string, string][]) {
         R.push(row(k, v));
