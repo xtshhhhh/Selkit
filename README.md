@@ -1,4 +1,7 @@
-# pi-ccswitch-sync
+# Selkit
+
+> 原名 `pi-ccswitch-sync`，v1.5.0 起改名为 **Selkit**。
+> 旧地址 `github.com/xtshhhhh/pi-ccswitch-sync` 仍会自动重定向，已安装的不用动。
 
 把 [CC Switch](https://github.com/farion1231/cc-switch) 里当前选中的中转站卡片同步成 [pi](https://github.com/earendil-works/pi-coding-agent) 的模型 provider，并提供一个分组模型选择窗口。
 
@@ -18,7 +21,7 @@
 ## 窗口长什么样
 
 ```
-╔═ MODEL PICKER ═══════════════════════════════════════════════SYS ▸ ONLINE NODE 1/3 ╤═════════════════════════╗
+╔═ SELKIT ═════════════════════════════════════════════════════SYS ▸ ONLINE NODE 1/3 ╤═════════════════════════╗
 ║▐ Codex ▌ ▕ Claude ▏ ▕ 鸡蛋 ▏                                                       │═ COMMAND DECK           ║
 ║════════════════════════════════════════════════════════════════════════════════════│ 鼠标  单击选中          ║
 ║─ ccs-codex Codex 面 (9)────────────────────────────────────────────────────────────│ 双击  确认选择          ║
@@ -39,7 +42,7 @@
 ║                                                                                    │ 总数  14                ║
 ║                                                                                    │ 分组  3                 ║
 ║                                                                                    │ 页码  —                 ║
-╚═▓▒░ cyberspace model selector ░▒▓══════════════════════════════════════════════════╧═════════════════════════╝
+╚═▓▒░ SELKIT · cyberspace model selector ░▒▓═════════════════════════════════════════╧═════════════════════════╝
 
 **符号**：`◉` = 当前模型 · `▸` = 光标 · `◈` = 支持推理 · `◆` = 支持图片
 
@@ -73,19 +76,19 @@
 ## 安装
 
 ```bash
-pi install git:github.com/xtshhhhh/pi-ccswitch-sync
+pi install git:github.com/xtshhhhh/Selkit
 ```
 
 或本地试用：
 
 ```bash
-pi install /path/to/pi-ccswitch-sync
+pi install /path/to/Selkit
 ```
 
 只试一次、不写进配置：
 
 ```bash
-pi -e git:github.com/xtshhhhh/pi-ccswitch-sync
+pi -e git:github.com/xtshhhhh/Selkit
 ```
 
 ## 前置条件

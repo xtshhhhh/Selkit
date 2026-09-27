@@ -945,15 +945,15 @@ class ModelPicker implements Component {
     // ══════════════════════════════════════════════════════
     // 内容行 = ║ + leftW + │ + deckW + ║
     // 顶行   = ╔ + title/fill(leftW) + ╤ + deckW + ╗
-    const used = visibleWidth(" MODEL PICKER ") + visibleWidth("SYS ▸ ONLINE ") +
+    const used = visibleWidth(" SELKIT ") + visibleWidth("SYS ▸ ONLINE ") +
       visibleWidth(`NODE ${this.groupIndex + 1}/${Math.max(1, this.groups.length)} `);
     let top: string;
     if (leftW - used - 1 >= 4) {
-      top = neon("═") + accent(T.bold(" MODEL PICKER ")) +
+      top = neon("═") + accent(T.bold(" SELKIT ")) +
         neon(fill("═", leftW - used - 1)) + cyan("SYS ▸ ONLINE ") +
         neon(`NODE ${this.groupIndex + 1}/${Math.max(1, this.groups.length)} `);
     } else {
-      const t = truncateToWidth(" MODEL PICKER ", Math.max(4, leftW - 3));
+      const t = truncateToWidth(" SELKIT ", Math.max(4, leftW - 3));
       top = neon("═") + accent(T.bold(t)) + neon(fill("═", leftW - 1 - visibleWidth(t)));
     }
 
@@ -971,7 +971,7 @@ class ModelPicker implements Component {
     // 内容行 = ║ + leftW + │ + deckW + ║ = leftW + deckW + 3
     // 底行   = ╚═ + foot + fill + ╧ + deckW + ╝ = foot + fill + deckW + 4
     // 令相等 → fill = leftW - foot - 1
-    const foot = "▓▒░ cyberspace model selector ░▒▓";
+    const foot = "▓▒░ SELKIT · cyberspace model selector ░▒▓";
     const footShown = truncateToWidth(foot, Math.max(4, leftW - 2));
     out.push(
       neon("╚═") + dim(footShown) +

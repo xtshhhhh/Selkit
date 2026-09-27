@@ -1,7 +1,7 @@
 {
-  "name": "pi-ccswitch-sync",
-  "version": "1.5.0",
-  "description": "Sync CC Switch relays into pi as model providers, plus a cyberpunk mouse-driven grouped model picker with custom relay groups and a thinking-level selector.",
+  "name": "selkit",
+  "version": "1.6.0",
+  "description": "Selkit — 把 CC Switch 中转站同步成 pi 的模型 provider，带赛博朋克风格的分组模型选择窗口（鼠标操控 / 自定义分组 / 思考强度）。",
   "keywords": [
     "pi-package",
     "pi",
@@ -32,5 +32,13 @@
   ],
   "engines": {
     "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xtshhhhh/Selkit.git"
+  },
+  "homepage": "https://github.com/xtshhhhh/Selkit#readme",
+  "bugs": {
+    "url": "https://github.com/xtshhhhh/Selkit/issues"
   }
 }

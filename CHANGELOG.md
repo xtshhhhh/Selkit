@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.6.0
+
+### 改名 Selkit
+
+原来的名字 `pi-ccswitch-sync` 太长了 —— 每次装、每次升、每次跟人提都要打一长串，
+而且名字里带着 `ccswitch` 会让人以为它只能干「同步 CC Switch」这一件事。
+现在它能做的事情已经多得多：分组窗口、鼠标操控、任意中转站分组、思考强度。
+
+改名为 **Selkit**。
+
+**老用户不用做任何事。** GitHub 会永久重定向旧地址：
+
+```
+github.com/xtshhhhh/pi-ccswitch-sync  →  github.com/xtshhhhh/Selkit
+```
+
+`pi install` / `pi update` 走旧地址照样能拉到。想换成新地址：
+
+```bash
+pi remove git:github.com/xtshhhhh/pi-ccswitch-sync
+pi install git:github.com/xtshhhhh/Selkit
+```
+
+### 窗口标题也跟着改了
+
+```
+╔═ SELKIT ═════════════════════════════════════════SYS ▸ ONLINE NODE 1/3 ╤══╗
+║▐ Codex ▌ ▕ Claude ▏ ▕ 鸡蛋 ▏                              ║
+╚═▓▒░ SELKIT · cyberspace model selector ░▒▓════════════════╝
+```
+
+标题从 `MODEL PICKER`（14 字符）换成 `SELKIT`（8 字符），底栏也变长了 ——
+这两处都参与窗口宽度计算，所以重新跑了全部宽度测试：12–150 列逐行精确相等，
+单测 27/27 通过，真机 140 列确认 `NODE 1/3` 正常、无旧标题残留。
+
+### 顺带
+
+- `package.json` 补上 `repository` / `homepage` / `bugs` 字段
+- npm 包名改为 `selkit`
 ## 1.5.0
 
 ### 新增：鼠标操控窗口
