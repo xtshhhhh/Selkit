@@ -78,7 +78,7 @@ const CLAUDE_PROXY_URL = "http://127.0.0.1:15721";
 const CLAUDE_PROXY_KEY = "cc-switch-local";
 
 /** 上游 /models 请求超时（毫秒）。 */
-const FETCH_TIMEOUT_MS = 10_000;
+const FETCH_TIMEOUT_MS = 5_000;
 
 /** 模型元数据（中转站不可信，统一给宽值）。 */
 const CODEX_CONTEXT = 400_000;
@@ -237,20 +237,28 @@ async function resolveClaude(): Promise<{ id: string; baseUrl: string; models: s
 // ─────────────────────────────────────────────────────────────
 
 /** 拉某张 codex 卡开放的模型；失败返回空数组。 */
-async function fetchCodexModels(baseUrl: string, apiKey: string): Promise<string[]> {
-  try {
-    const res = await fetch(baseUrl.replace(/\/+$/, "") + "/models", {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-    if (!res.ok) return [];
-    const json: any = await res.json();
-    const list = json?.data ?? json?.models ?? [];
-    if (!Array.isArray(list)) return [];
-    return list.map((m: any) => m?.id).filter((x: any): x is string => typeof x === "string");
-  } catch {
-    return [];
+async function fetchCodexModels(baseUrl: string, apiKey: string): Promise<string[] | undefined> {
+  const url = baseUrl.replace(/\/+$/, "") + "/models";
+  // 连上游偶尔会连接超时（Cloudflare + 本地网络），重试两次
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+      // 明确的服务端回复：不管 200/401/404，都算「拿过答复了」
+      if (!res.ok) return [];
+      const json: any = await res.json();
+      const list = json?.data ?? json?.models ?? [];
+      if (!Array.isArray(list)) return [];
+      return list.map((m: any) => m?.id).filter((x: any): x is string => typeof x === "string");
+    } catch {
+      // 网络层失败（超时/DNS/TLS）：等一下重试
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+    }
   }
+  // 三次都失败 → 返回 undefined，表示「不知道」，别当成「没有模型」
+  return undefined;
 }
 
 /** 拉 Codex 面卡对应的模型列表。 */
@@ -268,7 +276,21 @@ async function resolveCodex(): Promise<
 
     const live = await fetchCodexModels(baseUrl, apiKey);
     const pinned = toml(p.sc?.config || "", "model");
-    const models = live.length ? live : pinned ? [pinned] : [];
+    // 优先级：实时列表 > 上次缓存 > 卡里 pin 的单个模型
+    //
+    // live === undefined 表示网络失败。这时绝不能只用 pinned，
+    // 否则会把「8 个模型」缩成「1 个」，还会把这份残缺写进缓存。
+    let models: string[] = [];
+    if (live !== undefined) {
+      models = live.length ? live : pinned ? [pinned] : [];
+    } else {
+      const prev = readCache();
+      if (prev && prev.codex.baseUrl === baseUrl && prev.codex.models.length) {
+        models = prev.codex.models;
+      } else if (pinned) {
+        models = [pinned];
+      }
+    }
     if (!models.length) continue;
 
     // current 模式用固定 id；多站模式按域名区分
@@ -345,7 +367,18 @@ export default async function (pi: ExtensionAPI) {
     registered = keep;
 
     // 写缓存，下次启动可秒注册
-    if (cache.claude.length || cache.codex.models.length) writeCache(cache);
+    // 只在 codex 面确实联网成功（模型数 > 1）时才覆盖缓存，
+    // 免得网络抖动把一份残缺列表固化成下次启动的默认。
+    const cacheOk =
+      cache.codex.models.length > 1 ||
+      (cache.codex.models.length === 1 && !readCache()?.codex.models.length);
+    if (cache.claude.length && cacheOk) writeCache(cache);
+    else if (cache.claude.length) {
+      // codex 面没拿到，只更新 claude 部分
+      const prev = readCache();
+      if (prev) writeCache({ claude: cache.claude, codex: prev.codex });
+      else writeCache(cache);
+    }
 
     return parts.length ? parts.join("  ") : "CC Switch 里没有可用的卡";
   }

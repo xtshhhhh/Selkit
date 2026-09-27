@@ -1,5 +1,93 @@
 # Changelog
 
+## 1.3.4
+
+### 修复：窗口里只剩 1 个模型
+
+现象：`ccs-codex` 面从 10 个模型缩成 **1 个**（只剩卡里 pin 的那个）。
+
+### 根因：网络抖动 → 缓存被「残缺列表」覆盖
+
+三个环节连起来正好把一个临时故障固化成永久状态：
+
+```
+上游连接超时
+   ↓
+fetchCodexModels() 返回 []
+   ↓
+`live.length ? live : pinned` 退回卡里 pin 的单个模型
+   ↓
+writeCache() 把「1 个」写进缓存
+   ↓
+下次启动用缓存秒注册 → 永远只有 1 个
+```
+
+`sub.unsee.you` 是 Cloudflare 后的站点，实测会**间歇性连接超时**
+（`UND_ERR_CONNECT_TIMEOUT`）：同一时刻 curl 能通、node fetch 超时；
+重跑几次又有成功。所以这不是域名挂了，是抖。
+
+### 修法
+
+**① 区分「网络失败」和「真的没有模型」**
+
+`fetchCodexModels` 现在返回 `string[] | undefined`：
+
+```ts
+// 明确的服务端回复（200/401/404）→ 算拿过答复了，可以是空数组
+if (!res.ok) return [];
+// 三次网络层失败 → 返回 undefined，表示「不知道」
+return undefined;
+```
+
+**② 网络失败时退回旧缓存，而不是只留 pinned**
+
+```ts
+let models: string[] = [];
+if (live !== undefined) {
+  models = live.length ? live : pinned ? [pinned] : [];
+} else {
+  // live === undefined：网络失败，用上次缓存
+  const prev = readCache();
+  if (prev && prev.codex.baseUrl === baseUrl && prev.codex.models.length) {
+    models = prev.codex.models;
+  } else if (pinned) {
+    models = [pinned];
+  }
+}
+```
+
+**③ 只拿单条结果时不覆盖缓存**
+
+```ts
+const cacheOk =
+  cache.codex.models.length > 1 ||
+  (cache.codex.models.length === 1 && !readCache()?.codex.models.length);
+if (cache.claude.length && cacheOk) writeCache(cache);
+else if (cache.claude.length) {
+  // codex 面没拿到，只更新 claude 部分
+  const prev = readCache();
+  if (prev) writeCache({ claude: cache.claude, codex: prev.codex });
+}
+```
+
+**④ 加重试**
+
+网络层失败时重试 2 次（间隔 250ms / 500ms）；单次超时从 10s 降到 5s
+（成功时实测 < 2s，5s 足够，重试也不会拖太久）。
+
+### 验证
+
+| 测试 | 结果 |
+|---|---|
+| 连续跑 3 次 `pi`，缓存稳定 | 3/3 都是 `codex=10 claude=3` |
+| 模拟网络失败（超时设 1ms）| 缓存仍是 **10 个**，没被覆盖成 1 个 ✓ |
+| 重试逻辑单独测 | 第 1 次 1968ms 成功 → 10 个 |
+| 真机 TUI（150 列）`Ctrl+L` → `PgDn` | 窗口 `总数 13`，10 个 codex 模型全在，含 `glm-5.3` / `kimi-k3` ✓ |
+| 启动耗时 | 1021 / 1007 / 1044 ms |
+
+### 顺带
+
+上游现在返回 **10 个**模型（`glm-5.3`、`kimi-k3` 之前一度消失，是上游自己撤了又放回来）。
 ## 1.3.3
 
 ### 修复：按小写 `d` 没反应
