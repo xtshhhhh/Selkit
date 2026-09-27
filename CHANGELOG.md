@@ -1,5 +1,85 @@
 # Changelog
 
+## 1.4.0
+
+### 新增：额外分组（CC Switch 之外的中转站）
+
+以前只有两个面（`cc-switch` Claude 面 / `ccs-codex` Codex 面）。
+现在可以加任意多个自己的分组，在窗口里独立成一组。
+
+**配置写在 `~/.pi/agent/ccswitch-extra.json`**（含 key，不进仓库）：
+
+```json
+{
+  "groups": [
+    {
+      "id": "ccs-egg",
+      "label": "鸡蛋",
+      "name": "鸡蛋 · DeepSeek",
+      "baseUrl": "https://your-relay.example.com/v1",
+      "apiKey": "sk-...",
+      "api": "openai-responses",
+      "contextWindow": 600000,
+      "maxTokens": 128000,
+      "enabled": true
+    }
+  ]
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `id` | provider id。**固定后别改**，改了默认模型会丢 |
+| `label` | 窗口里显示的分组名 |
+| `name` | provider 的完整名 |
+| `baseUrl` / `apiKey` | 中转站地址与 key |
+| `api` | `openai-responses` 或 `openai-completions` |
+| `contextWindow` / `maxTokens` | 模型元数据 |
+| `enabled` | 设 `false` 可临时禁用 |
+
+加第二个分组就往 `groups` 里再塞一个对象，不用改代码。
+
+### 实现要点
+
+**① 和主流程一样分两段跑**
+
+- **工厂函数**：读本地缓存注册（~1ms），保证默认模型能解析
+- **`session_start`**：联网刷新
+
+**② 网络失败不缩水**
+
+沿用主流程那套：`fetchCodexModels` 返回 `undefined` 表示「不知道」，
+这时用上次缓存，不用 pinned 单条覆盖。
+
+**③ 分组标签从配置读**
+
+`model-picker.ts` 的 `providerLabel()` 先查 `ccswitch-extra.json` 里的
+`label`，所以新分组不用改 picker。
+
+**④ 缓存分离**
+
+额外分组的模型列表存 `~/.pi/agent/ccswitch-extra-models.json`，
+和 CC Switch 那套互不干扰。
+
+### 验证
+
+真机（150 列）：
+
+```
+╔═ MODEL PICKER ══════════════════ SYS ▸ ONLINE NODE 3/3 ╤══╗
+║┌─[ ccs-egg ] 鸡蛋 (2)────────────────────────────────────┐│ 1-9 0  定位到第 N 项
+║▐▸  1  deepseek-v4.1-flash                  600K ◈◆      ▌│ PgUp/Dn  切换分组
+║│   2  deepseek-v4.1-flash-expires-on-0910  600K ◈◆      ││ ←  →  切换分组
+║└────────────────────────────────────────────────────────┘│ d  D  设为默认
+                                                             │ 总数  15
+                                                             │ 分组  3
+```
+
+- `SYS ▸ ONLINE NODE 3/3`、`分组 3`、`总数 15`（3 + 10 + 2）
+- 三个分组标签都对：`Claude 面` / `Codex 面` / `鸡蛋`
+- 在 `ccs-egg` 组里按 `1` → `d` 成功设默认（`ccs-egg/deepseek-v4.1-flash`）
+- 启动耗时 1029 / 1072 / 1066 ms（没变慢）
+
 ## 1.3.5
 
 ### 修复：默认模型失效，被顶成列表第一个

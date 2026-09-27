@@ -142,9 +142,24 @@ function saveDefaultModel(provider: string, modelId: string): boolean {
 
 type Group = { provider: string; label: string; models: Model<Api>[] };
 
+/**
+ * 分组标题右边的注释。
+ *
+ * 除内置两个面外，其余分组从 ~/.pi/agent/ccswitch-extra.json 里读 label，
+ * 这样加新中转站时不用改这里。
+ */
 function providerLabel(provider: string, sample: Model<Api> | undefined): string {
   if (provider === "cc-switch") return "Claude 面";
   if (provider === "ccs-codex") return "Codex 面";
+
+  // 额外分组：读配置里的 label
+  try {
+    const p = path.join(os.homedir(), ".pi", "agent", "ccswitch-extra.json");
+    const j = JSON.parse(fs.readFileSync(p, "utf8"));
+    const g = (j?.groups ?? []).find((x: any) => x?.id === provider);
+    if (g?.label) return String(g.label);
+  } catch {}
+
   try {
     const host = sample?.baseUrl ? new URL(sample.baseUrl).host : "";
     if (host) return host;

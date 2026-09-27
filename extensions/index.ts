@@ -51,6 +51,72 @@ function writeCache(e: CacheEntry): void {
 }
 
 // ─────────────────────────────────────────────────────────────
+//  额外分组（CC Switch 之外的中转站）
+// ─────────────────────────────────────────────────────────────
+//
+// 配置写在 ~/.pi/agent/ccswitch-extra.json（含 key，不进仓库）：
+//
+//   { "groups": [ {
+//       "id": "ccs-egg",          // provider id，固定后别改
+//       "label": "鸡蛋",           // 窗口里显示的分组名
+//       "name": "鸡蛋 · DeepSeek",  // provider 的完整名
+//       "baseUrl": "https://…/v1",
+//       "apiKey": "sk-…",
+//       "api": "openai-responses", // 或 openai-completions
+//       "contextWindow": 600000,
+//       "maxTokens": 128000,
+//       "enabled": true
+//   } ] }
+
+const EXTRA_FILE = path.join(os.homedir(), ".pi", "agent", "ccswitch-extra.json");
+
+interface ExtraGroup {
+  id: string;
+  label?: string;
+  name?: string;
+  baseUrl: string;
+  apiKey: string;
+  api?: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  enabled?: boolean;
+}
+
+function readExtraGroups(): ExtraGroup[] {
+  try {
+    const j = JSON.parse(fs.readFileSync(EXTRA_FILE, "utf8"));
+    const list = Array.isArray(j?.groups) ? j.groups : [];
+    return list.filter((g: any): g is ExtraGroup =>
+      !!g && typeof g.id === "string" && typeof g.baseUrl === "string" && typeof g.apiKey === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** 额外分组的模型列表缓存文件。 */
+const EXTRA_CACHE = path.join(os.homedir(), ".pi", "agent", "ccswitch-extra-models.json");
+
+type ExtraModels = Record<string, string[]>;
+
+function readExtraModels(): ExtraModels {
+  try {
+    const j = JSON.parse(fs.readFileSync(EXTRA_CACHE, "utf8"));
+    return j && typeof j === "object" ? j : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeExtraModels(m: ExtraModels): void {
+  try {
+    fs.writeFileSync(EXTRA_CACHE, JSON.stringify(m, null, 2));
+  } catch {
+    /* 忽略 */
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 //  配置
 // ─────────────────────────────────────────────────────────────
 
@@ -360,6 +426,33 @@ export default async function (pi: ExtensionAPI) {
       }
     } catch {}
 
+    // ── 额外分组 ──
+    const extraNext: ExtraModels = {};
+    for (const g of extras) {
+      try {
+        const live = await fetchCodexModels(g.baseUrl, g.apiKey);
+        const prev = extraCached[g.id] ?? [];
+        // 网络失败(live===undefined) 就沿用上次，别把列表缩水
+        const models = live === undefined ? prev : live.length ? live : g.pinned ? [g.pinned] : prev;
+        if (!models.length) continue;
+        extraNext[g.id] = models;
+        pi.registerProvider(g.id, {
+          name: g.name || g.label || g.id,
+          baseUrl: g.baseUrl,
+          apiKey: g.apiKey,
+          api: (g.api || "openai-responses") as any,
+          models: models.map((m) =>
+            modelMeta(m, g.contextWindow ?? CODEX_CONTEXT, g.maxTokens ?? CODEX_MAX_TOKENS),
+          ),
+        });
+        keep.push(g.id);
+        parts.push(`${g.id}=${models.length}`);
+      } catch {
+        /* 单个分组失败忽略 */
+      }
+    }
+    if (Object.keys(extraNext).length) writeExtraModels(extraNext);
+
     // 清掉这次不再需要的
     for (const old of registered) {
       if (!keep.includes(old)) pi.unregisterProvider(old);
@@ -425,6 +518,28 @@ export default async function (pi: ExtensionAPI) {
       }
     } catch {
       /* 缓存坏了就忽略 */
+    }
+  }
+
+  // ── 额外分组：工厂里注册（同样要早于默认模型解析）───────
+  const extras = readExtraGroups().filter((g) => g.enabled !== false);
+  const extraCached = readExtraModels();
+  for (const g of extras) {
+    const models = extraCached[g.id]?.length ? extraCached[g.id] : [];
+    if (!models.length) continue; // 没缓存就等联网那次
+    try {
+      pi.registerProvider(g.id, {
+        name: g.name || g.label || g.id,
+        baseUrl: g.baseUrl,
+        apiKey: g.apiKey,
+        api: (g.api || "openai-responses") as any,
+        models: models.map((m) =>
+          modelMeta(m, g.contextWindow ?? CODEX_CONTEXT, g.maxTokens ?? CODEX_MAX_TOKENS),
+        ),
+      });
+      registered.push(g.id);
+    } catch {
+      /* 单个分组失败不影响其它 */
     }
   }
 
