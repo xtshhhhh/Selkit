@@ -115,18 +115,6 @@ const OVERRIDE_MODEL_COMMAND = true;
  * 中文输入法开着时打 /model 会变成 ／ｍｏｄｅｌ（U+FF0F…），
  * 直接比较会不相等。这里把全角 ASCII（U+FF01..U+FF5E）与全角空格转回半角。
  */
-function normalizeCommand(s: string): string {
-  return [...s]
-    .map((ch) => {
-      const c = ch.codePointAt(0) ?? 0;
-      if (c >= 0xff01 && c <= 0xff5e) return String.fromCharCode(c - 0xfee0);
-      if (c === 0x3000) return " ";
-      return ch;
-    })
-    .join("")
-    .trim();
-}
-
 // ─────────────────────────────────────────────────────────────
 //  settings.json
 // ─────────────────────────────────────────────────────────────
@@ -1169,11 +1157,11 @@ export default function (pi: ExtensionAPI) {
     await open(ctx, (args ?? "").trim().toLowerCase() === "default");
   };
 
-  // 只留 /model 一个入口（/mp 已按要求删除）
+  // 三个入口等效，随便用哪个
   pi.registerCommand("models", { description: "分组模型选择窗口（同 Ctrl+L）", handler });
   pi.registerCommand("mp", { description: "分组模型选择窗口（同 Ctrl+L）", handler });
 
-  // ── 只提供 Ctrl+L 入口 ──
+  // ── Ctrl+L 入口
   //
   // 为什么必须换编辑器（三条路都被 pi 堵死了）：
   //   1. registerCommand("model")  —— 无效。内置 /model 分支在
