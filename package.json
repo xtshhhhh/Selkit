@@ -1,7 +1,7 @@
 {
   "name": "pi-ccswitch-sync",
   "version": "1.5.0",
-  "description": "Sync CC Switch relays into pi as model providers, with a cyberpunk grouped model picker that overrides /model.",
+  "description": "Sync CC Switch relays into pi as model providers, plus a cyberpunk mouse-driven grouped model picker with custom relay groups and a thinking-level selector.",
   "keywords": [
     "pi-package",
     "pi",
@@ -11,7 +11,8 @@
     "provider",
     "relay",
     "model-picker",
-    "tui"
+    "tui",
+    "mouse"
   ],
   "license": "MIT",
   "type": "module",
