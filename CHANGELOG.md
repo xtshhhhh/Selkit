@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.3.1
+
+### 窗口恢复到最后那版（赛博朋克）
+
+v1.3.0 误把窗口退回成了旧的简版。现在恢复 v1.2.4 的外壳：
+
+- 左右分栏，右侧 `COMMAND DECK` 指令面板
+- 92% 居中 overlay
+- 模型按 provider 分组，每组独立编号框
+- 数字键 `1-9 / 0` 选中，`PgUp/PgDn` `←/→` 换组，`<` `>` 翻页
+- `D` 设默认，`R` 重新同步，打字过滤，`Esc` 关闭
+
+### 入口：只留 Ctrl+L
+
+| 入口 | 说明 |
+|---|---|
+| `Ctrl+L` | 分组窗口（拦原始字节 `0x0C`）|
+| `/models` | 同上 |
+| `/mp` | 同上 |
+| `/model` | **不覆盖**，保持 pi 原生 |
+
+`/model` 覆盖在 5 个版本里始终无法稳定生效，原因层层叠加：
+
+1. pi 在 TUI 层就吃掉 `/model`（`setupEditorSubmitHandler` 早于扩展命令）
+2. `ctrl+l` 在 `RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS` 里，`registerShortcut` 被跳过
+3. 换编辑器后 pi 覆盖 `onSubmit`；差分渲染少 1 列会让画面错乱
+4. 中文输入法全角 `／ｍｏｄｅｌ` 与 `/model` 永不相等
+
+所以保留「换编辑器拦 `Ctrl+L`」这一条已经被真机验证可行的路，
+不再碰 `/model`。
+
+### 实测
+
+真机（node-pty，150 列）：
+
+```
+╔═ MODEL PICKER ══════════════════════════════ SYS ▸ ONLINE NODE 2/2 ╤══╗
+║┌─[ ccs-codex ] Codex 面 (8)─────────────────────────────────────────┐│═ COMMAND DECK
+║▐▸  1  deepseek-v4-flash                              600K ◈◆       ▌│ 1-9 0  选择模型
+║│   2  deepseek-v4-flash-0731                         600K ◈◆       ││ PgUp/Dn  切换分组
+║│   3  deepseek-v4-pro                                600K ◈◆       ││ ←  →  切换分组
+║│   4  deepseek-v4-pro-0813                           600K ◈◆       ││ ↑  ↓  移动光标
+║│   5  deepseek-v4.1-flash                            600K ◈◆       ││ j  k  移动光标
+║│   6  deepseek-v4.1-flash-expires-on-0910            600K ◈◆       ││ <  >  组内翻页
+║│   7  glm-5.1                                        600K ◈◆       ││ Enter  确认选择
+║│   8  glm-5.2                                        600K ◈◆       ││ D  设为默认
+╚═▓▒░ cyberspace model selector ░▒▓═══════════════════════════════════╧══╝
+```
+
+测试 20/20：命令注册、Ctrl+L 拦截、`/model` 放行、渲染宽度 12–150 列精确对齐。
+
+> 模型数从 13 变成 11（`ccs-codex` 8 个）是因为上游 `sub.unsee.you`
+> 撤掉了 `glm-5.3` / `kimi-k3`，实时 `/models` 也确实只返回 8 个。
+
 ## 1.3.0
 
 ### 回退：不再覆盖 `/model` 和 `Ctrl+L`
