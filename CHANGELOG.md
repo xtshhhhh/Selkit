@@ -1,5 +1,86 @@
 # Changelog
 
+## 1.3.5
+
+### 修复：默认模型失效，被顶成列表第一个
+
+现象：`settings.json` 里明明写着
+
+```json
+"defaultProvider": "ccs-codex",
+"defaultModel": "deepseek-v4.1-flash-expires-on-0910"
+```
+
+启动后却变成了 `cc-switch/[Cloud]GLM-5.3-Flash`（可选中列表的第一个）。
+
+### 根因：v1.3.0 那次启动优化把它挪到了错误的时机
+
+pi 的启动顺序（`main.js:575-640`）：
+
+```
+① resourceLoader 加载扩展（跑工厂函数）
+② resolveModelScope
+③ buildSessionOptions → 解析默认模型   ← 在这一步找 provider
+④ createAgentSessionFromServices → emit session_start
+```
+
+**解析默认模型发生在 `session_start` 之前。**
+
+v1.3.0 为了不让网络请求阻塞启动，把 provider 注册整个挪进了
+`session_start`。结果第 ③ 步执行时 `ccs-codex` 还没注册：
+
+```js
+// model-resolver.js:503
+if (defaultProvider && defaultModelId) {
+    const found = modelRuntime.getModel(defaultProvider, defaultModelId);
+    if (found && modelRuntime.hasConfiguredAuth(found.provider)) {
+        return { model, thinkingLevel, ... };      // 找不到 → 跳过
+    }
+}
+// 第 4 步：拿第一个可用模型
+const availableModels = [...modelRuntime.getAvailableSnapshot()];
+return { model: availableModels[0], thinkingLevel: DEFAULT_THINKING_LEVEL };
+```
+
+### 修法
+
+把「用本地缓存注册」这一半挪回**工厂函数**（读文件约 1ms），
+网络刷新仍留在 `session_start`：
+
+```ts
+// 工厂函数里（第 ③ 步之前）
+const cached = readCache();
+if (cached) {
+  if (cached.claude.length) pi.registerProvider(CLAUDE_PROVIDER_ID, { ... });
+  if (cached.codex.models.length) pi.registerProvider(CODEX_PROVIDER_ID, { ... });
+}
+
+// session_start 里只做联网刷新
+pi.on("session_start", async () => { await sync(); });
+```
+
+这样两个目标同时满足：
+
+| 目标 | 做法 |
+|---|---|
+| 启动不阻塞 | 工厂只读本地缓存（~1ms），不联网 |
+| 默认模型能解析 | provider 在第 ③ 步之前就存在 |
+
+### 验证
+
+真机 footer（150 列）：
+
+```
+0.0%/600k (auto)                    deepseek-v4.1-flash-expires-on-0910 • high
+```
+
+修复前是 `[Cloud]GLM-5.3-Flash`。
+
+| 测试 | 结果 |
+|---|---|
+| 默认模型 | `deepseek-v4.1-flash-expires-on-0910` ✓ |
+| 启动耗时 | 1041 / 1070 / 1074 ms（没变慢）|
+| 模型完整性 | `ccs-codex` 组存在，`glm-5.3` / `kimi-k3` 都在 ✓ |
 ## 1.3.4
 
 ### 修复：窗口里只剩 1 个模型

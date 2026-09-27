@@ -383,43 +383,57 @@ export default async function (pi: ExtensionAPI) {
     return parts.length ? parts.join("  ") : "CC Switch 里没有可用的卡";
   }
 
-  // ── 同步：不阻塞启动 ────────────────────────────────────
+  // ── 启动注册：必须在工厂里做完 ──────────────────────────
   //
-  // pi 会 await 工厂函数，所以这里直接 await sync() 会卡住启动
-  // （实测 1955ms，慢的话要等满 10s 网络超时）。
-  // pi 文档保证：初始加载后调 registerProvider 会立即生效，
-  // 所以放到 session_start（TUI 已就绪）里做。
-  pi.on("session_start", async () => {
-    // ① 先用缓存秒注册 —— 模型立刻可用，不等网络
-    const cached = readCache();
-    if (cached) {
-      try {
-        if (cached.claude.length) {
-          pi.registerProvider(CLAUDE_PROVIDER_ID, {
-            name: "CC Switch · Claude 面",
-            baseUrl: CLAUDE_PROXY_URL,
-            apiKey: CLAUDE_PROXY_KEY,
-            api: "anthropic-messages",
-            models: cached.claude.map((m) => modelMeta(m, CLAUDE_CONTEXT, CLAUDE_MAX_TOKENS)),
-          });
-          registered.push(CLAUDE_PROVIDER_ID);
-        }
-        if (cached.codex.models.length) {
-          pi.registerProvider(CODEX_PROVIDER_ID, {
-            name: `CC Switch · codex …${cached.codex.apiKey.slice(-4)}`,
-            baseUrl: cached.codex.baseUrl,
-            apiKey: cached.codex.apiKey,
-            api: "openai-responses",
-            models: cached.codex.models.map((m) => modelMeta(m, CODEX_CONTEXT, CODEX_MAX_TOKENS)),
-          });
-          registered.push(CODEX_PROVIDER_ID);
-        }
-      } catch {
-        /* 缓存坏了就忽略 */
+  // 踩过的坑：把注册挪到 session_start 会导致「默认模型失效」。
+  //
+  // pi 的启动顺序（main.js:575-640）是：
+  //   ① resourceLoader 加载扩展（跑工厂函数）
+  //   ② resolveModelScope
+  //   ③ buildSessionOptions → 解析默认模型 ← 在这一步找 provider
+  //   ④ createAgentSessionFromServices → emit session_start
+  //
+  // 也就是说解析默认模型发生在 session_start **之前**。
+  // 那时 ccs-codex 还没注册，model-resolver.js:503 的
+  //   getModel(defaultProvider, defaultModelId) → undefined
+  // 于是掉到第 4 步拿 availableModels[0]，默认模型就被顶掉了。
+  //
+  // 所以：工厂里必须用「本地缓存」把 provider 注册好（读文件约 1ms）。
+  // 网络请求仍然留到 session_start，不阻塞启动。
+  const cached = readCache();
+  if (cached) {
+    try {
+      if (cached.claude.length) {
+        pi.registerProvider(CLAUDE_PROVIDER_ID, {
+          name: "CC Switch · Claude 面",
+          baseUrl: CLAUDE_PROXY_URL,
+          apiKey: CLAUDE_PROXY_KEY,
+          api: "anthropic-messages",
+          models: cached.claude.map((m) => modelMeta(m, CLAUDE_CONTEXT, CLAUDE_MAX_TOKENS)),
+        });
+        registered.push(CLAUDE_PROVIDER_ID);
       }
+      if (cached.codex.models.length) {
+        pi.registerProvider(CODEX_PROVIDER_ID, {
+          name: `CC Switch · codex …${cached.codex.apiKey.slice(-4)}`,
+          baseUrl: cached.codex.baseUrl,
+          apiKey: cached.codex.apiKey,
+          api: "openai-responses",
+          models: cached.codex.models.map((m) => modelMeta(m, CODEX_CONTEXT, CODEX_MAX_TOKENS)),
+        });
+        registered.push(CODEX_PROVIDER_ID);
+      }
+    } catch {
+      /* 缓存坏了就忽略 */
     }
+  }
 
-    // ② 再后台联网刷新（覆盖缓存）
+  // ── 联网刷新：不阻塞启动 ────────────────────────────────
+  //
+  // pi 会 await 工厂函数，直接 await sync() 会卡住启动
+  // （实测 1955ms，慢的话要等满超时）。pi 文档保证：初始加载后
+  // 调 registerProvider 会立即生效，所以放到 session_start 里做。
+  pi.on("session_start", async () => {
     try {
       await sync();
     } catch {
